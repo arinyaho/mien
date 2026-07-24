@@ -102,10 +102,11 @@ class Profile:
     # than where it sits, so it fits repositories kept side by side with no
     # per-employer directory convention.
     owns_remotes: list[str] = field(default_factory=list)
-    # The git author a commit under this identity should carry. `mien git sync`
-    # writes these into an `includeIf`'d gitconfig so `git commit` is authored
-    # correctly without a global default. Left unset until asked for (the default
-    # offered is the profile's Google/Atlassian email and GitHub username).
+    # The git author address a commit under this identity carries. Setting git's
+    # own `user.email` is git's job (native `includeIf`); mien reads git_email
+    # only for the author cross-check, so guard/statusline can warn when a
+    # commit's `user.email` disagrees with the identity acting here. Set it when
+    # you commit under an address none of the profile's accounts carry.
     git_email: str | None = None
     git_name: str | None = None
 

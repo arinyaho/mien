@@ -217,17 +217,35 @@ For a global hook across every repository, point `core.hooksPath` at a directory
 
 It refuses only what it is sure about: no config, an unknown owner, or an unrecognized author all *allow* (it never blocks on a guess), and any internal error allows too, so a bug can't wedge your commits. Every refusal is overridable — `MIEN_GUARD=off`, `--force`, or `git commit --no-verify` — so it guides rather than traps. Using the repository's own signals to *block* is safe in a way that using them to *act* is not: a crafted `origin` can at worst cause a false refusal you override, never a mis-action.
 
-## Commit as the right you — natively
+## Commit as the right you — git's own job
 
-Blocking a mis-authored commit is the backstop; the better fix is git never producing one. `mien git sync` reads each profile's `owns_remotes` and approved `.mien` workspaces and generates git `includeIf` rules — by repository owner and by directory — so git itself stamps the correct `user.email`/`user.name` in every repo an identity owns:
+Blocking a mis-authored commit is the backstop; the better fix is git never producing one. Git already does this natively with `includeIf` — mien does not reinvent it. Point git at a per-identity config by directory or by repository owner, and git itself stamps the correct `user.email`/`user.name`:
 
-```bash
-mien git sync
-# git email for work [me@acme.example]: ⏎
-# git name for work [acme-me]: ⏎
+```gitconfig
+# ~/.gitconfig
+[includeIf "gitdir:~/work/"]          # everything under ~/work commits as work
+    path = ~/.gitconfig-work
+# by repo owner — one hasconfig covers https:// and ssh://, a second covers the scp git@…: form
+[includeIf "hasconfig:remote.*.url:**/*github.com/acme-inc/**"]
+    path = ~/.gitconfig-work
+[includeIf "hasconfig:remote.*.url:**github.com:acme-inc/**"]
+    path = ~/.gitconfig-work
 ```
 
-It asks for a profile's git identity the first time it needs it (defaulting to the account email and GitHub username) and saves it, then writes the rules and includes them from `~/.gitconfig`. From then on a commit in an `acme-inc` repo is authored as `work` and one in a personal repo as you — with no global default and no per-repo setup. Verified against real `git config` resolution for `https://`, `ssh://`, and `git@…:` remotes. (The generated files are under `~/.config/mien/`; regenerate any time with `mien git sync`.)
+```gitconfig
+# ~/.gitconfig-work
+[user]
+    email = me@acme.example
+    name  = acme-me
+```
+
+A single `**/*github.com/acme-inc/**` glob matches `https://` and `ssh://` remotes but *not* the scp `git@github.com:acme-inc/…` form (its leading `**` can't cross the `:` boundary), so the scp form needs the second `**github.com:acme-inc/**` rule — both verified against real `git config` resolution. Then tell mien the address that profile commits under by adding `git_email` to it in `~/.config/mien/config.json` — the same place routing scopes like `owns_remotes` live:
+
+```jsonc
+"work": { "owns_remotes": ["github.com/acme-*/*"], "git_email": "me@acme.example" }
+```
+
+mien never writes git's `user.email` (that's git's includeIf above); it reads `git_email` only so the [guard](#refuse-to-act-as-the-wrong-you) and status line can warn when a commit's `user.email` disagrees with the identity acting here — the case git's own rules can't catch.
 
 ## Ambient per-project env
 

@@ -213,65 +213,7 @@ def test_changing_the_declaration_reblocks_until_reapproved(tmp_path, monkeypatc
     assert result.exit_code != 0 and "not allowed" in result.output
 
 
-def test_git_sync_writes_includeif_from_owns_remotes(tmp_path, monkeypatch):
-    from mien.config import (BackendConfig, Config, GoogleService, Profile,
-                             SecretNaming, save_config)
-    monkeypatch.setenv("MIEN_CONFIG", str(tmp_path / "config.json"))
-    monkeypatch.setattr("mien.cli._ensure_git_include", lambda _p: True)
-    save_config(Config(
-        schema_version=1,
-        secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
-        profiles={"work": Profile(
-            name="work", owns_remotes=["github.com/acme-inc/*"],
-            git_email="me@acme.example", git_name="acme-me")},
-    ))
-    result = CliRunner().invoke(main, ["git", "sync"])
-    assert result.exit_code == 0, result.output
-    main_gc = (tmp_path / "gitconfig").read_text()
-    assert "hasconfig:remote.*.url:**/*github.com/acme-inc/**" in main_gc
-    assert "hasconfig:remote.*.url:**github.com:acme-inc/**" in main_gc
-    prof_gc = (tmp_path / "git" / "work.gitconfig").read_text()
-    assert "email = me@acme.example" in prof_gc and "name = acme-me" in prof_gc
 
-
-def test_git_sync_asks_for_a_missing_git_email_and_saves_it(tmp_path, monkeypatch):
-    from mien.config import (BackendConfig, Config, GoogleService, Profile,
-                             SecretNaming, load_config, save_config)
-    monkeypatch.setenv("MIEN_CONFIG", str(tmp_path / "config.json"))
-    monkeypatch.setattr("mien.cli._ensure_git_include", lambda _p: True)
-    save_config(Config(
-        schema_version=1,
-        secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
-        profiles={"work": Profile(
-            name="work", owns_remotes=["github.com/acme-inc/*"],
-            google=GoogleService(
-                email="me@acme.example", oauth_client_id="c",
-                oauth_client_secret_ref=None, refresh_token_ref=None, adc_ref=None,
-                gcloud_config_name="work", default_project=None,
-                gcloud_login_required=True))},
-    ))
-    # Accept the offered defaults (google email, github-less → email local part).
-    result = CliRunner().invoke(main, ["git", "sync"], input="\n\n")
-    assert result.exit_code == 0, result.output
-    saved = load_config().profiles["work"]
-    assert saved.git_email == "me@acme.example"  # persisted after the prompt
-    assert "email = me@acme.example" in (tmp_path / "git" / "work.gitconfig").read_text()
-
-
-def test_git_sync_errors_when_nothing_to_sync(tmp_path, monkeypatch):
-    from mien.config import (BackendConfig, Config, Profile, SecretNaming,
-                             save_config)
-    monkeypatch.setenv("MIEN_CONFIG", str(tmp_path / "config.json"))
-    save_config(Config(
-        schema_version=1,
-        secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
-        profiles={"work": Profile(name="work")},  # no owns_remotes, no .mien
-    ))
-    result = CliRunner().invoke(main, ["git", "sync"])
-    assert result.exit_code != 0 and "nothing to sync" in result.output
 
 
 def _github_profile(runner, mien_cfg, mocker, username="octocat"):
@@ -1042,25 +984,25 @@ def test_init_sets_quota_project_for_gcp(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.return_value = None
     sub = mocker.patch("mien.cli.subprocess.run")
-    result = runner.invoke(main, ["init"], input="1\nsayu-studio\nme@x.com\n")
+    result = runner.invoke(main, ["init"], input="1\nside-proj\nme@x.com\n")
     assert result.exit_code == 0, result.output
     quota_calls = [
         c for c in sub.call_args_list
         if c[0][0][:4] == ["gcloud", "auth", "application-default", "set-quota-project"]
     ]
     assert len(quota_calls) == 1
-    assert quota_calls[0][0][0][4] == "sayu-studio"
-    assert "quota project to sayu-studio" in result.output
+    assert quota_calls[0][0][0][4] == "side-proj"
+    assert "quota project to side-proj" in result.output
 
 
 def test_init_warns_when_quota_project_set_fails(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.return_value = None
     mocker.patch("mien.cli.subprocess.run", side_effect=FileNotFoundError("gcloud"))
-    result = runner.invoke(main, ["init"], input="1\nsayu-studio\nme@x.com\n")
+    result = runner.invoke(main, ["init"], input="1\nside-proj\nme@x.com\n")
     assert result.exit_code == 0
     assert "could not set ADC quota project" in result.output
-    assert "gcloud auth application-default set-quota-project sayu-studio" in result.output
+    assert "gcloud auth application-default set-quota-project side-proj" in result.output
 
 
 def test_login_google_shows_oauth_hint_when_client_id_missing(runner, mien_cfg, mocker):
@@ -1069,7 +1011,7 @@ def test_login_google_shows_oauth_hint_when_client_id_missing(runner, mien_cfg, 
     backend.put.side_effect = ["ref://oauth", "ref://refresh"]
     mocker.patch("mien.cli.google_installed_app_flow", return_value="refresh-zzz")
     mocker.patch("mien.cli.subprocess.run")  # set-quota-project no-op
-    runner.invoke(main, ["init"], input="1\nsayu-studio\nme@x.com\n")
+    runner.invoke(main, ["init"], input="1\nside-proj\nme@x.com\n")
     result = runner.invoke(
         main,
         ["login", "personal", "--service", "google", "--email", "me@x.com"],
@@ -1078,7 +1020,7 @@ def test_login_google_shows_oauth_hint_when_client_id_missing(runner, mien_cfg, 
     assert result.exit_code == 0, result.output
     assert "OAuth Desktop client" in result.output
     assert "console.cloud.google.com/apis/credentials" in result.output
-    assert "sayu-studio" in result.output
+    assert "side-proj" in result.output
 
 
 def test_login_google_skips_hint_when_client_id_provided(runner, mien_cfg, mocker):
@@ -1087,7 +1029,7 @@ def test_login_google_skips_hint_when_client_id_provided(runner, mien_cfg, mocke
     backend.put.side_effect = ["ref://oauth", "ref://refresh"]
     mocker.patch("mien.cli.google_installed_app_flow", return_value="refresh-zzz")
     mocker.patch("mien.cli.subprocess.run")
-    runner.invoke(main, ["init"], input="1\nsayu-studio\nme@x.com\n")
+    runner.invoke(main, ["init"], input="1\nside-proj\nme@x.com\n")
     result = runner.invoke(
         main,
         ["login", "personal", "--service", "google",

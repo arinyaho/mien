@@ -70,14 +70,14 @@ def test_google_synthesizes_adc_from_refresh_token(monkeypatch, tmp_path, fake_b
 def test_skips_adc_when_login_required(monkeypatch, tmp_path, fake_backend):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     prof = Profile(
-        name="heaan",
+        name="work",
         google=GoogleService(
             email="me@h.com",
             oauth_client_id="cid",
             oauth_client_secret_ref=None,
             refresh_token_ref="refresh-ref",
             adc_ref=None,
-            gcloud_config_name="heaan",
+            gcloud_config_name="work",
             default_project="hp",
             gcloud_login_required=True,
         ),

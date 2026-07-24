@@ -63,10 +63,9 @@ $MIEN token google --profile <p>    # mint a fresh google access token (for curl
 $MIEN statusline                    # one-line identity segment for a Claude Code status line
 $MIEN prompt                        # same segment for a shell prompt (zsh RPROMPT / bash PS1)
 $MIEN guard                         # exit non-zero if the identity is confidently wrong for this repo
-$MIEN git sync                      # generate git includeIf so commits are authored per identity
 ```
 
-**Commit author (`mien git sync`).** Generates git `includeIf` rules from each profile's `owns_remotes` (by repo owner) and approved `.mien` workspaces (by directory), pointing at a per-profile gitconfig with its `[user] email`/`name`, and includes them from `~/.gitconfig` — so `git commit` is authored as the right identity natively (prevention; `guard` is the backstop). Asks for a profile's git email/name the first time it is needed (default: the account email + GitHub username) and saves it to the profile. If the user wants "commit as the right me automatically," this is the command.
+**Commit author is git's own job.** mien does not set `user.email` — git already does this natively with `includeIf` (`gitdir:` by directory, `hasconfig:remote.*.url:` by repo owner) pointing at a per-identity gitconfig. Set a profile's `git_email` to the address it commits under; mien uses it only for the author cross-check, so `guard` and the status line warn when a commit's `user.email` disagrees with the identity acting here. Prevention is git's includeIf; `guard` is the backstop.
 
 **Project-local declaration (`.mien`).** The simplest way to bind a workspace to a profile is a `.mien` file naming it — `mien claim <profile>` writes it, approves it, and adds it to the global git ignore in one step. `mien run`/`which` and the status line then act as that profile for the whole tree, with no central scope. Security: a `.mien` is a checked-out file, so it does **not** drive the acting identity until the user approves it (`mien allow`) — a cloned repo's `.mien` is inert, and an edited one must be re-approved. If a directory declares an unapproved `.mien`, `mien which`/`run` fail loud (they don't silently route); tell the user to run `mien allow`. Precedence: `MIEN_PROFILE` → approved `.mien` → central `default_for`/`owns_remotes`.
 

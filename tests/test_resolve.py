@@ -38,6 +38,17 @@ class TestProfileForEmail:
               "b": _gp("b", atlassian="shared@x.example")}
         assert profile_for_email(ps, "shared@x.example") is None
 
+    def test_matches_an_explicit_git_email_none_of_the_accounts_carry(self):
+        ps = {"work": Profile(name="work", git_email="Commits@Acme.example",
+                              google=GoogleService(
+                                  email="me@acme.example", oauth_client_id="c",
+                                  oauth_client_secret_ref=None, refresh_token_ref=None,
+                                  adc_ref=None, gcloud_config_name="work",
+                                  default_project=None, gcloud_login_required=True))}
+        # the commit address differs from the Google login, yet still attributes
+        assert profile_for_email(ps, "commits@acme.example") == "work"
+        assert profile_for_email(ps, "me@acme.example") == "work"
+
 
 def prof(name: str, *globs: str) -> Profile:
     return Profile(name=name, default_for=list(globs))

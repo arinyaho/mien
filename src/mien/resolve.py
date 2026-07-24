@@ -282,12 +282,15 @@ def git_author_email(cwd: str) -> str | None:
 def _profile_emails(profile: Profile) -> set[str]:
     """The email addresses known to identify ``profile``, lower-cased.
 
-    Drawn from what the profile already declares — its Google and Atlassian
-    account emails, and the GitHub no-reply address derived from its username —
-    so a commit's `user.email` can be attributed to a profile without any new
-    configuration.
+    Drawn from what the profile already declares — an explicit `git_email`, its
+    Google and Atlassian account emails, and the GitHub no-reply address derived
+    from its username — so a commit's `user.email` can be attributed to a profile.
+    The explicit `git_email` is the one to set when you commit under an address
+    none of the accounts carry.
     """
     emails: set[str] = set()
+    if profile.git_email:
+        emails.add(profile.git_email.lower())
     if profile.google and profile.google.email:
         emails.add(profile.google.email.lower())
     if profile.atlassian and profile.atlassian.email:

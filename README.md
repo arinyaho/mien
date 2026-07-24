@@ -217,17 +217,26 @@ For a global hook across every repository, point `core.hooksPath` at a directory
 
 It refuses only what it is sure about: no config, an unknown owner, or an unrecognized author all *allow* (it never blocks on a guess), and any internal error allows too, so a bug can't wedge your commits. Every refusal is overridable — `MIEN_GUARD=off`, `--force`, or `git commit --no-verify` — so it guides rather than traps. Using the repository's own signals to *block* is safe in a way that using them to *act* is not: a crafted `origin` can at worst cause a false refusal you override, never a mis-action.
 
-## Commit as the right you — natively
+## Commit as the right you — git's own job
 
-Blocking a mis-authored commit is the backstop; the better fix is git never producing one. `mien git sync` reads each profile's `owns_remotes` and approved `.mien` workspaces and generates git `includeIf` rules — by repository owner and by directory — so git itself stamps the correct `user.email`/`user.name` in every repo an identity owns:
+Blocking a mis-authored commit is the backstop; the better fix is git never producing one. Git already does this natively with `includeIf` — mien does not reinvent it. Point git at a per-identity config by directory or by repository owner, and git itself stamps the correct `user.email`/`user.name`:
 
-```bash
-mien git sync
-# git email for work [me@acme.example]: ⏎
-# git name for work [acme-me]: ⏎
+```gitconfig
+# ~/.gitconfig
+[includeIf "gitdir:~/work/"]          # everything under ~/work commits as work
+    path = ~/.gitconfig-work
+[includeIf "hasconfig:remote.*.url:**/*github.com/acme-inc/**"]  # by repo owner
+    path = ~/.gitconfig-work
 ```
 
-It asks for a profile's git identity the first time it needs it (defaulting to the account email and GitHub username) and saves it, then writes the rules and includes them from `~/.gitconfig`. From then on a commit in an `acme-inc` repo is authored as `work` and one in a personal repo as you — with no global default and no per-repo setup. Verified against real `git config` resolution for `https://`, `ssh://`, and `git@…:` remotes. (The generated files are under `~/.config/mien/`; regenerate any time with `mien git sync`.)
+```gitconfig
+# ~/.gitconfig-work
+[user]
+    email = me@acme.example
+    name  = acme-me
+```
+
+The `hasconfig` form matches `https://`, `ssh://`, and `git@…:` remotes (verified against real `git config` resolution). Tell mien the address a profile commits under — `git_email` in the profile — and the [guard](#refuse-to-act-as-the-wrong-you) and status line warn when a commit's `user.email` disagrees with the identity acting here, catching the case git's own rules miss. mien knows your commit identity; git sets it.
 
 ## Ambient per-project env
 

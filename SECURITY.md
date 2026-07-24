@@ -40,6 +40,7 @@ Treat the config file and the backend manifest as trusted input. Do not import a
 | `~/.config/mien/ambient.zsh` | 0600 | Generated `case` blocks exporting each profile's `project_env` values | rewritten by `mien env sync` |
 | `~/.zshenv` (a marked region) | 0600 | One line sourcing `ambient.zsh` | nothing |
 | `~/.config/mien/allowed.json` | 0600 | Approved `.mien` declarations (declaration path → profile). No secret | edited by `mien allow` / `mien claim` |
+| `~/.config/git/ignore` (git's `core.excludesFile`) | your umask | One `.mien` line appended so declarations are globally git-ignored. No secret | nothing |
 | `$TMPDIR/mien/<pid>-<profile>-adc.json` | 0600 | **Secret.** Google OAuth client secret + refresh token | see [Lifetime](#lifetime-and-cleanup) |
 | `$TMPDIR/mien/<pid>-<profile>-ssh_key.json` | 0600 | **Secret.** A GitHub SSH private key | see [Lifetime](#lifetime-and-cleanup) |
 | `$TMPDIR/mien/<pid>-<profile>-slack.json` | 0600 | **Secret.** Every Slack token on the profile, by workspace | see [Lifetime](#lifetime-and-cleanup) |
@@ -48,7 +49,7 @@ Treat the config file and the backend manifest as trusted input. Do not import a
 
 `$TMPDIR/mien/` itself is created with your umask, so typically 0755. The files inside are 0600, but their **names encode the profile and PID**. Where `TMPDIR` is a shared `/tmp`, other local users can list which identities exist and when they are active. On macOS the default `TMPDIR` is a per-user 0700 directory, so that exposure does not apply there.
 
-Beyond the table above, `mien` writes nowhere else. It never writes to `~/.ssh`, `~/.aws`, `~/.oci`, `~/.config/gh`, `~/.gitconfig`, or gcloud's credential store. One documented exception edits a tool's own config, never a credential: `mien init` with the GCP backend runs `gcloud auth application-default set-quota-project`, causing gcloud to update its own ADC file. Authoring git commits per identity is left to git's native `includeIf` — mien reads a profile's `git_email` for its author cross-check but never writes any gitconfig.
+Beyond the table above, `mien` writes nowhere else. It never writes to `~/.ssh`, `~/.aws`, `~/.oci`, `~/.config/gh`, `~/.gitconfig`, or gcloud's credential store. Two documented writes edit a tool's own config, never a credential: `mien claim` appends `.mien` to git's global ignore (`~/.config/git/ignore`, in the table), and `mien init` with the GCP backend runs `gcloud auth application-default set-quota-project`, causing gcloud to update its own ADC file. Authoring git commits per identity is left to git's native `includeIf` — mien reads a profile's `git_email` for its author cross-check but never writes any gitconfig.
 
 ## The environment-variable surface
 

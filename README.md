@@ -225,7 +225,10 @@ Blocking a mis-authored commit is the backstop; the better fix is git never prod
 # ~/.gitconfig
 [includeIf "gitdir:~/work/"]          # everything under ~/work commits as work
     path = ~/.gitconfig-work
-[includeIf "hasconfig:remote.*.url:**/*github.com/acme-inc/**"]  # by repo owner
+# by repo owner — one hasconfig covers https:// and ssh://, a second covers the scp git@…: form
+[includeIf "hasconfig:remote.*.url:**/*github.com/acme-inc/**"]
+    path = ~/.gitconfig-work
+[includeIf "hasconfig:remote.*.url:**github.com:acme-inc/**"]
     path = ~/.gitconfig-work
 ```
 
@@ -236,7 +239,13 @@ Blocking a mis-authored commit is the backstop; the better fix is git never prod
     name  = acme-me
 ```
 
-The `hasconfig` form matches `https://`, `ssh://`, and `git@…:` remotes (verified against real `git config` resolution). Tell mien the address a profile commits under — `git_email` in the profile — and the [guard](#refuse-to-act-as-the-wrong-you) and status line warn when a commit's `user.email` disagrees with the identity acting here, catching the case git's own rules miss. mien knows your commit identity; git sets it.
+A single `**/*github.com/acme-inc/**` glob matches `https://` and `ssh://` remotes but *not* the scp `git@github.com:acme-inc/…` form (its leading `**` can't cross the `:` boundary), so the scp form needs the second `**github.com:acme-inc/**` rule — both verified against real `git config` resolution. Then tell mien the address that profile commits under by adding `git_email` to it in `~/.config/mien/config.json` — the same place routing scopes like `owns_remotes` live:
+
+```jsonc
+"work": { "owns_remotes": ["github.com/acme-*/*"], "git_email": "me@acme.example" }
+```
+
+mien never writes git's `user.email` (that's git's includeIf above); it reads `git_email` only so the [guard](#refuse-to-act-as-the-wrong-you) and status line can warn when a commit's `user.email` disagrees with the identity acting here — the case git's own rules can't catch.
 
 ## Ambient per-project env
 

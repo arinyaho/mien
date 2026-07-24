@@ -49,6 +49,7 @@ Use `$MIEN` instead of `mien` in all subsequent commands.
 ## Core commands
 
 ```
+$MIEN discover                      # inventory local AWS/OCI/gcloud/GitHub identities and what to import
 $MIEN list                          # see profiles
 $MIEN status                        # what is active in *this* shell
 $MIEN whoami [<profile>]            # the whole bundled identity as a card; --json for machine form; --live to verify

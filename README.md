@@ -85,11 +85,26 @@ Once installed, the agent invokes `mien` automatically when you mention identity
 ## Bootstrap
 
 ```bash
+mien discover                           # what identities are already on this machine?
 mien init                               # pick a backend
 mien login personal --service github
 mien login personal --service google --email me@x.com --client-id <id>
 mien login personal --service slack --workspace team-a
 ```
+
+`mien discover` is the onboarding shortcut: it inventories the AWS/OCI profiles, gcloud configurations, and GitHub accounts already configured locally, and shows which are bound to a mien profile and which are not — with the `mien login` command to import each:
+
+```
+GitHub accounts:
+  ✓ octocat (github.com) — in a mien profile
+  · octo-work (github.com) — not imported
+      mien login <profile> --service github --username octo-work
+AWS profiles:
+  · work — not imported
+      mien login <profile> --service aws --aws-profile work
+```
+
+It reads no secret and writes nothing — importing stays an explicit `mien login`.
 
 See `skills/mien/references/` for full docs.
 

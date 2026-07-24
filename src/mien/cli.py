@@ -37,6 +37,7 @@ from mien.config import (
 from mien.env import build_env
 from mien.manifest import MANIFEST_SECRET_NAME, is_cloud_backend, pull_manifest, push_manifest
 from mien.oauth import exchange_refresh_token, google_installed_app_flow
+from mien.discover import discover_all, render_report
 from mien.gitsync import (default_git_email, default_git_name, git_identity,
                           gitdir_pattern, hasconfig_patterns,
                           main_gitconfig_path, profile_gitconfig_path,
@@ -1385,6 +1386,20 @@ def which_cmd() -> None:
             "one explicitly."
         )
     click.echo(name)
+
+
+@main.command("discover")
+def discover_cmd() -> None:
+    """Inventory the identities already on this machine and what to import.
+
+    Read-only: it inspects local AWS/OCI profiles, gcloud configurations, and
+    GitHub accounts, and reports which are already bound to a mien profile and
+    which are not — with the `mien login` command to import each. It reads no
+    secret and writes nothing; importing stays an explicit act.
+    """
+    cfg = load_config()
+    profiles = cfg.profiles if cfg else {}
+    click.echo(render_report(discover_all(), profiles))
 
 
 @main.command("allow")

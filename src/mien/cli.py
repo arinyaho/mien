@@ -1540,7 +1540,7 @@ _HTTP_HINT_FOR = {
         "Google client library read it directly under `mien exec`; if you truly "
         "need the string, use --force here, or:\n"
         "    mien exec <profile> -- sh -c 'curl -H \"Authorization: Bearer "
-        "$(gcloud auth print-access-token)\" ...'"
+        "$(gcloud auth application-default print-access-token)\" ...'"
     ),
 }
 

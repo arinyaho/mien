@@ -77,13 +77,13 @@ mien exec personal -- sh -c 'curl -s -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2022-06-28" https://api.notion.com/v1/users/me'
 mien exec personal -- sh -c 'curl -s -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN" \
   "$ATLASSIAN_BASE_URL/rest/api/3/issue/PROJ-123"'   # Atlassian is Basic, not Bearer
-mien exec personal -- sh -c 'curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+mien exec personal -- sh -c 'curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
   "https://gmail.googleapis.com/gmail/v1/users/me/profile"'
 ```
 
 Google is the one service with no bare-token variable — `mien exec` gives it
 `GOOGLE_APPLICATION_CREDENTIALS`, an ADC *file path* a client library reads directly, so
-the token is minted in the child above. `mien token google` still prints one, but that is
+the token is minted from it in the child above. `mien token google` still prints one, but that is
 the case its harness refusal covers: from an agent it needs `--force` or
 `MIEN_TOKEN=capture-ok`.
 

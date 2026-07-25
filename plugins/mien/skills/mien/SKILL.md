@@ -162,10 +162,11 @@ under *any* valid token and exit status alone gates nothing:
 For Gmail/Calendar/Drive (no helper in v1). Google is the one service with no bare-token
 variable: `exec` exports `GOOGLE_APPLICATION_CREDENTIALS`, an ADC *file path*, which a
 Google client library reads directly — prefer that. For a raw HTTP call, let the child
-shell mint the token so it never reaches your shell or the transcript:
+shell mint the token from that same ADC file so it never reaches your shell or the
+transcript:
 
 ```bash
-$MIEN exec work-foo -- sh -c 'curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+$MIEN exec work-foo -- sh -c 'curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
   "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=from:foo"'
 ```
 

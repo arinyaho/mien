@@ -1574,7 +1574,7 @@ def test_token_refusal_does_not_offer_google_adc_path_as_a_bearer_token(
     assert "Bearer $GOOGLE_APPLICATION_CREDENTIALS" not in result.output
     assert "file path" in result.output
     # Points at the honest remedies instead.
-    assert "gcloud auth print-access-token" in result.output
+    assert "gcloud auth application-default print-access-token" in result.output
     assert "--force" in result.output
 
 

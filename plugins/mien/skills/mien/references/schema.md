@@ -148,6 +148,6 @@ existing working config is not broken by the check.
 
 `mien-config-manifest` is reserved: `mien` stores a non-secret snapshot of
 `config.json` (refs and identifiers only — no secret values) under this name in
-cloud backends (`gcp_secret_manager`). It is pushed automatically
+the cloud backend (`gcp_secret_manager`). It is pushed automatically
 after every `mien login` / `mien logout`. Do not create a profile whose rendered
 secret name collides with it.

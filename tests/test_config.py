@@ -5,6 +5,7 @@ import pytest
 
 from mien.config import (
     BackendConfig,
+    ConfigError,
     Config,
     GitHubService,
     GoogleService,
@@ -142,7 +143,8 @@ def test_retired_fields_in_an_older_config_are_ignored():
 @pytest.mark.parametrize("service, block", [
     ("aws", {"profile_name": "work"}),          # meant `profile`
     ("oci", {"profil": "WORK"}),                # meant `profile`
-    ("github", {"ssh_keypath": "/k"}),          # meant `ssh_key_path`
+    ("github", {"username": "octo", "host": "github.com",
+                 "ssh_keypath": "/k"}),   # meant `ssh_key_path`
 ])
 def test_a_misspelled_service_key_still_fails_loudly(service, block):
     """Tolerating retired keys must not become tolerating typos.
@@ -158,7 +160,7 @@ def test_a_misspelled_service_key_still_fails_loudly(service, block):
         "bootstrap": {}, "secret_naming": {},
         "profiles": {"work": {service: block}},
     }
-    with pytest.raises(TypeError):
+    with pytest.raises(ConfigError, match="Valid keys are"):
         deserialize_config(raw)
 
 

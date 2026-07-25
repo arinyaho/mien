@@ -20,6 +20,7 @@ from mien.backends import UnknownBackendType, ensure_known_backend, load_backend
 from mien.ephemeral import EphemeralStore
 from mien.config import (
     AWSService,
+    ConfigError,
     AtlassianService,
     BackendConfig,
     Config,
@@ -66,12 +67,26 @@ def _friendly_backend_message(exc: BaseException) -> str | None:
         # "Error: ..." instead of a traceback.
         return str(exc)
 
+    if isinstance(exc, ConfigError):
+        return (
+            f"{exc}\n\n"
+            f"The config is at {config_path()}.\n"
+            "Until it parses, mien cannot tell which identity is which — so the "
+            "status line stays blank and `mien guard` stops enforcing."
+        )
+
     try:
         from google.api_core import exceptions as gerr
     except ImportError:
         gerr = None  # type: ignore[assignment]
 
-    cfg = load_config()
+    # Guarded: this runs inside an exception handler, and a config that itself
+    # fails to parse would re-raise here and bury the original error under a
+    # chained traceback.
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = None
     project = "<project>"
     account = "<bootstrap-email>"
     if cfg:
@@ -1047,7 +1062,7 @@ def push_cmd() -> None:
     if not is_cloud_backend(cfg.secrets_backend):
         # Intentionally exit 0 (not an error like sync): pushing a manifest to a
         # local-only backend is simply meaningless, not a user mistake.
-        click.echo("push is a no-op for local backends (macos_keychain)")
+        click.echo("push is a no-op for local backends (macos_keychain, keyring)")
         return
     backend = load_backend(cfg.secrets_backend)
     push_manifest(cfg, backend)
@@ -1447,6 +1462,10 @@ def statusline_cmd() -> None:
         if cfg is None:
             return  # mien is not set up here — stay silent rather than nag.
         click.echo(_identity_segment(cfg, _statusline_cwd()))
+    except ConfigError as exc:
+        # Say so rather than going blank: an empty segment reads as "nothing to
+        # report", when in fact mien can no longer tell who you are here.
+        click.echo(f"mien: config unreadable — {exc}", err=True)
     except Exception:
         return
 
@@ -1473,6 +1492,8 @@ def prompt_cmd() -> None:
         if cfg is None:
             return
         click.echo(_identity_segment(cfg, _logical_cwd()), nl=False)
+    except ConfigError as exc:
+        click.echo(f"mien: config unreadable — {exc}", err=True)
     except Exception:
         return
 
@@ -1583,6 +1604,12 @@ def guard_cmd(force: bool) -> None:
             env_profile, claimed, source=source or "dir",
             author_profile=author, env_known=env_known,
         )
+    except ConfigError as exc:
+        # Still fail open — a broken config must not wedge your commits — but a
+        # guard that has silently stopped guarding is worse than one that says so.
+        click.echo(
+            f"mien: guard is NOT enforcing — config unreadable: {exc}", err=True)
+        return
     except Exception:
         return  # fail open: never wedge an action because guard itself broke.
     if reason:

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dc_fields
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -208,6 +209,15 @@ def _glob_list_from_raw(
     return list(value)
 
 
+class ConfigError(ValueError):
+    """The config file cannot be understood.
+
+    Distinct from a plain ValueError so the CLI can report it as an actionable
+    error instead of a traceback, and so the fail-open surfaces (status line,
+    guard) can say that they have stopped working rather than going quiet.
+    """
+
+
 # Keys a service block may still carry from an older mien, and the value each
 # one had to hold for its removal to be a no-op. Deliberately an explicit map
 # rather than "drop anything unrecognized": an unknown key is far more likely a
@@ -233,14 +243,23 @@ def _service_from_dict(cls, data: dict):
     for k, v in data.items():
         if k in retired:
             if v != retired[k]:
-                raise ValueError(
+                raise ConfigError(
                     f"{cls.__name__}: {k!r}={v!r} is no longer supported "
                     f"(only {retired[k]!r} was ever written). Remove it from your "
                     "config, or check whether you meant a different setting."
                 )
             continue
         cleaned[k] = v
-    return cls(**cleaned)
+    try:
+        return cls(**cleaned)
+    except TypeError as exc:
+        # Almost always a typo. Name it and list what is valid, rather than
+        # letting a bare TypeError traceback out — this is the likelier way a
+        # hand-edited config goes wrong, so it deserves the clearer message.
+        known = ", ".join(f.name for f in dc_fields(cls))
+        raise ConfigError(
+            f"{cls.__name__}: {exc}. Valid keys are: {known}."
+        ) from exc
 
 
 def _config_from_dict(raw: dict) -> Config:

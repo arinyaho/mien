@@ -1563,8 +1563,15 @@ def test_token_refusal_does_not_offer_google_adc_path_as_a_bearer_token(
     HTTP hint must not then contradict it by sending the path as a token.
     """
     backend = mocker.patch("mien.cli.load_backend").return_value
-    backend.put.return_value = "ref://g"
+    backend.put.side_effect = ["ref://oauth", "ref://refresh"]
+    mocker.patch("mien.cli.google_installed_app_flow", return_value="refresh-zzz")
     runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(
+        main,
+        ["login", "personal", "--service", "google",
+         "--email", "me@x.com", "--client-id", "cid"],
+        input="y\ncsec\n",
+    )
     result = runner.invoke(
         main, ["token", "google"],
         env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
@@ -1576,6 +1583,28 @@ def test_token_refusal_does_not_offer_google_adc_path_as_a_bearer_token(
     # Points at the honest remedies instead.
     assert "gcloud auth application-default print-access-token" in result.output
     assert "--force" in result.output
+
+
+def test_a_missing_identity_fails_loud_even_under_a_recorded_context(
+    runner, mien_cfg, mocker
+):
+    """The identity check must outrank the capture refusal.
+
+    Refusing first would answer "this profile has no notion identity" with
+    advice to read `$NOTION_TOKEN` — a variable `mien exec` never sets for such
+    a profile. Since `exec` overlays the environment without scrubbing, another
+    identity's ambient token could satisfy that advice and the call would
+    succeed as the wrong person. Misconfiguration must stay loud.
+    """
+    _atlassian_profile(runner, mocker)  # 'personal' exists, but has no notion
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code != 0
+    assert "has no notion identity" in result.output
+    assert "NOTION_TOKEN" not in result.output  # not the refusal's advice
 
 
 @pytest.mark.parametrize("override", [

@@ -1502,7 +1502,7 @@ _GUARD_OFF = {"off", "0", "false", "no"}
 # fails *open*: an unrecognized harness is not detected, so this is a backstop
 # for the common case, never a guarantee.
 _CAPTURE_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MIEN_CAPTURED")
-_CAPTURE_OK = {"capture-ok", "allow-capture", "off"}
+_CAPTURE_OK = {"capture-ok", "off"}
 
 # What `mien exec` puts in the environment for each service `mien token` prints,
 # so the refusal can name the exact variable to reach for. Google is the odd one:
@@ -1647,13 +1647,35 @@ def token_cmd(service: str, profile: str | None, force: bool) -> None:
     command exists for the case that genuinely needs the bare string, and it
     refuses by default where stdout looks recorded (see `--force`).
     """
+    cfg = _require_config()
+    name = profile or os.environ.get("MIEN_PROFILE")
+    if not name:
+        raise click.ClickException(
+            "no profile: pass --profile <name>, or set $MIEN_PROFILE via "
+            'eval "$(mien use --owner-pid $$ <profile>)" in this same shell'
+        )
+    prof = cfg.profiles.get(name)
+    if not prof:
+        raise click.ClickException(f"profile {name!r} not found")
+    identity = getattr(prof, service)
+    if not identity:
+        raise click.ClickException(f"profile {name!r} has no {service} identity")
+
+    # The capture check sits here on purpose: *after* the identity is resolved,
+    # *before* the backend is touched. Refusing first would replace a real
+    # misconfiguration ("profile has no notion identity") with advice to read
+    # $NOTION_TOKEN — a variable `mien exec` never sets for such a profile —
+    # and `exec` overlays the environment without scrubbing, so following that
+    # advice could pick up another identity's ambient token and act as the
+    # wrong person. Failing loud on the identity first keeps that impossible;
+    # refusing before `load_backend` keeps a blocked call from spending one.
     marker = None if force else capture_context()
     if marker and os.environ.get("MIEN_TOKEN", "").strip().lower() not in _CAPTURE_OK:
         var = _EXEC_ENV_FOR[service]
         substitute = (
-            f"    mien exec <profile> -- <your command>   # arrives as ${var}"
+            f"    mien exec {name} -- <your command>   # arrives as ${var}"
             if service != "google" else
-            f"    mien exec <profile> -- <your command>   # arrives as ${var}\n"
+            f"    mien exec {name} -- <your command>   # arrives as ${var}\n"
             "    (an ADC credentials file — Google client libraries read it "
             "directly; there is no env form of a bare access token)"
         )
@@ -1666,39 +1688,19 @@ def token_cmd(service: str, profile: str | None, force: bool) -> None:
             f"{_HTTP_HINT_FOR[service]}\n"
             "  Override once: MIEN_TOKEN=capture-ok mien token ... (or --force)."
         )
-    cfg = _require_config()
-    name = profile or os.environ.get("MIEN_PROFILE")
-    if not name:
-        raise click.ClickException(
-            "no profile: pass --profile <name>, or set $MIEN_PROFILE via "
-            'eval "$(mien use --owner-pid $$ <profile>)" in this same shell'
-        )
-    prof = cfg.profiles.get(name)
-    if not prof:
-        raise click.ClickException(f"profile {name!r} not found")
+
     backend = load_backend(cfg.secrets_backend)
     if service == "google":
-        if not prof.google:
-            raise click.ClickException(f"profile {name!r} has no google identity")
-        g = prof.google
-        client_secret = backend.get(g.oauth_client_secret_ref).decode("utf-8")
-        refresh = backend.get(g.refresh_token_ref).decode("utf-8")
+        client_secret = backend.get(identity.oauth_client_secret_ref).decode("utf-8")
+        refresh = backend.get(identity.refresh_token_ref).decode("utf-8")
         access = exchange_refresh_token(
-            client_id=g.oauth_client_id,
+            client_id=identity.oauth_client_id,
             client_secret=client_secret,
             refresh_token=refresh,
         )
         click.echo(access)
-    elif service == "atlassian":
-        if not prof.atlassian:
-            raise click.ClickException(f"profile {name!r} has no atlassian identity")
-        token = backend.get(prof.atlassian.api_token_ref).decode("utf-8").strip()
-        click.echo(token)
-    elif service == "notion":
-        if not prof.notion:
-            raise click.ClickException(f"profile {name!r} has no notion identity")
-        token = backend.get(prof.notion.api_token_ref).decode("utf-8").strip()
-        click.echo(token)
+    else:
+        click.echo(backend.get(identity.api_token_ref).decode("utf-8").strip())
 
 
 @main.command("logout")

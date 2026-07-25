@@ -36,7 +36,13 @@ from mien.config import (
     save_config,
 )
 from mien.env import build_env
-from mien.manifest import MANIFEST_SECRET_NAME, is_cloud_backend, pull_manifest, push_manifest
+from mien.manifest import (
+    MANIFEST_SECRET_NAME,
+    ManifestError,
+    is_cloud_backend,
+    pull_manifest,
+    push_manifest,
+)
 from mien.oauth import exchange_refresh_token, google_installed_app_flow
 from mien.discover import discover_all, render_report
 from mien.project import (ensure_gitignored, find_declaration, is_allowed,
@@ -66,6 +72,22 @@ def _friendly_backend_message(exc: BaseException) -> str | None:
         # exist. Carrying it through here is what turns it into a clean
         # "Error: ..." instead of a traceback.
         return str(exc)
+
+    # Before the plain-ConfigError branch: ManifestError subclasses it, and the
+    # local-config advice below is all false for a manifest (wrong document,
+    # wrong fix, and neither the status line nor guard is affected).
+    if isinstance(exc, ManifestError):
+        return (
+            f"{exc}\n\n"
+            f"That is the backend's config manifest (the {MANIFEST_SECRET_NAME!r} "
+            "secret), not your local config — most likely written by a mien of a "
+            "different version.\n"
+            "Your local config parses fine, so the status line and `mien guard` are "
+            "unaffected; only syncing from the backend is blocked.\n\n"
+            "If your local config is the copy you want to keep, overwrite the "
+            "manifest with it:\n"
+            "  mien push"
+        )
 
     if isinstance(exc, ConfigError):
         return (

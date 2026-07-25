@@ -1246,6 +1246,48 @@ def test_sync_no_manifest_errors(runner, mien_cfg, mocker):
     assert "no manifest" in result.output.lower()
 
 
+def test_sync_unparseable_manifest_blames_the_manifest_not_local_config(
+    runner, mien_cfg, mocker
+):
+    """A manifest written by another mien must not read as "your config is broken"."""
+    from mien.manifest import MANIFEST_SECRET_NAME
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.health_check.return_value = None
+    mocker.patch("mien.cli.subprocess.run")
+    runner.invoke(
+        main,
+        ["init", "--backend", "gcp_secret_manager", "--no-import",
+         "--project", "p1", "--bootstrap-email", "me@x.com"],
+    )
+    before = mien_cfg.read_text()
+    # real pull_manifest, fed a manifest this build cannot parse
+    backend.list.return_value = [f"ref://{MANIFEST_SECRET_NAME}/versions/latest"]
+    backend.get.return_value = (
+        b'{"$schema_version": 99, "secrets_backend": {"type": "macos_keychain"}, '
+        b'"bootstrap": {}, "secret_naming": {}, "profiles": {}}'
+    )
+    result = runner.invoke(main, ["sync"])
+    assert result.exit_code != 0
+    assert MANIFEST_SECRET_NAME in result.output
+    assert str(mien_cfg) not in result.output  # never points at the local config
+    assert "stops enforcing" not in result.output  # guard is fine — local config parses
+    assert "mien push" in result.output  # the repair that actually applies
+    assert mien_cfg.read_text() == before  # local config untouched
+
+
+def test_unparseable_local_config_still_blames_the_local_config(runner, mien_cfg):
+    mien_cfg.write_text(
+        '{"$schema_version": 1, "secrets_backend": {"type": "macos_keychain"}, '
+        '"bootstrap": {}, "secret_naming": {}, "profiles": {"work": {"defualt_for": []}}}'
+    )
+    result = runner.invoke(main, ["list"])
+    assert result.exit_code != 0
+    assert str(mien_cfg) in result.output
+    assert "status line shows a warning" in result.output
+    assert "stops enforcing" in result.output
+    assert "mien-config-manifest" not in result.output
+
+
 def test_sync_requires_cloud_backend(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.return_value = None

@@ -1495,6 +1495,63 @@ def prompt_cmd() -> None:
 
 _GUARD_OFF = {"off", "0", "false", "no"}
 
+# Environment markers set by agent harnesses that record a command's output.
+# Presence means: anything this process writes to stdout may be captured into a
+# transcript that outlives the command — so printing a raw secret there is not a
+# transient exposure but a durable one. The list is a heuristic and deliberately
+# fails *open*: an unrecognized harness is not detected, so this is a backstop
+# for the common case, never a guarantee.
+_CAPTURE_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MIEN_CAPTURED")
+_CAPTURE_OK = {"capture-ok", "off"}
+
+# What `mien exec` puts in the environment for each service `mien token` prints,
+# so the refusal can name the exact variable to reach for. Google is the odd one:
+# `exec` supplies an ADC *credentials file*, not the bare access token this
+# command mints, so the substitute is a path rather than a token string.
+_EXEC_ENV_FOR = {
+    "notion": "NOTION_TOKEN",
+    "atlassian": "ATLASSIAN_API_TOKEN",
+    "google": "GOOGLE_APPLICATION_CREDENTIALS",
+}
+
+# The shape each service's credential actually takes on the wire, so the
+# refusal's one-off example is correct rather than merely plausible. Notion is
+# `Authorization: Bearer`; Atlassian Cloud is HTTP Basic (email:token), never
+# Bearer; and google has no bearer-token variable at all — its `exec` substitute
+# is an ADC file path, so sending it as a Bearer token would always 401. Google
+# therefore gets an honest remedy in place of an example.
+_HTTP_HINT_FOR = {
+    "notion": (
+        "  For a one-off HTTP call, let the child shell expand it:\n"
+        "    mien exec <profile> -- sh -c 'curl -H \"Authorization: Bearer "
+        "$NOTION_TOKEN\" -H \"Notion-Version: 2022-06-28\" "
+        "https://api.notion.com/v1/users/me'"
+    ),
+    "atlassian": (
+        "  For a one-off HTTP call, let the child shell expand it — Atlassian "
+        "Cloud uses HTTP Basic, not Bearer:\n"
+        "    mien exec <profile> -- sh -c 'curl -u "
+        "\"$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN\" "
+        "\"$ATLASSIAN_BASE_URL/rest/api/3/issue/PROJ-123\"'"
+    ),
+    "google": (
+        "  There is no bare-token variable to send in a header: "
+        "$GOOGLE_APPLICATION_CREDENTIALS is a file path, not a token. Let a "
+        "Google client library read it directly under `mien exec`; if you truly "
+        "need the string, use --force here, or:\n"
+        "    mien exec <profile> -- sh -c 'curl -H \"Authorization: Bearer "
+        "$(gcloud auth application-default print-access-token)\" ...'"
+    ),
+}
+
+
+def capture_context() -> str | None:
+    """The harness marker suggesting this command's stdout is being recorded."""
+    for marker in _CAPTURE_MARKERS:
+        if os.environ.get(marker, "").strip():
+            return marker
+    return None
+
 
 @main.command("guard")
 @click.option("--force", "-f", is_flag=True, help="Skip the check and exit 0.")
@@ -1580,7 +1637,16 @@ def run_cmd(argv: tuple[str, ...]) -> None:
     help="Profile to mint for. Defaults to $MIEN_PROFILE. Prefer passing this "
     "explicitly from an agent, whose shell state does not survive between calls.",
 )
-def token_cmd(service: str, profile: str | None) -> None:
+@click.option("--force", "-f", is_flag=True,
+              help="Print the secret even where stdout looks recorded.")
+def token_cmd(service: str, profile: str | None, force: bool) -> None:
+    """Print a credential for `service` on stdout — a raw secret.
+
+    Prefer `mien exec <profile> -- <cmd...>`, which hands the credential to the
+    command in its environment instead of writing it anywhere readable. This
+    command exists for the case that genuinely needs the bare string, and it
+    refuses by default where stdout looks recorded (see `--force`).
+    """
     cfg = _require_config()
     name = profile or os.environ.get("MIEN_PROFILE")
     if not name:
@@ -1591,29 +1657,50 @@ def token_cmd(service: str, profile: str | None) -> None:
     prof = cfg.profiles.get(name)
     if not prof:
         raise click.ClickException(f"profile {name!r} not found")
+    identity = getattr(prof, service)
+    if not identity:
+        raise click.ClickException(f"profile {name!r} has no {service} identity")
+
+    # The capture check sits here on purpose: *after* the identity is resolved,
+    # *before* the backend is touched. Refusing first would replace a real
+    # misconfiguration ("profile has no notion identity") with advice to read
+    # $NOTION_TOKEN — a variable `mien exec` never sets for such a profile —
+    # and `exec` overlays the environment without scrubbing, so following that
+    # advice could pick up another identity's ambient token and act as the
+    # wrong person. Failing loud on the identity first keeps that impossible;
+    # refusing before `load_backend` keeps a blocked call from spending one.
+    marker = None if force else capture_context()
+    if marker and os.environ.get("MIEN_TOKEN", "").strip().lower() not in _CAPTURE_OK:
+        var = _EXEC_ENV_FOR[service]
+        substitute = (
+            f"    mien exec {name} -- <your command>   # arrives as ${var}"
+            if service != "google" else
+            f"    mien exec {name} -- <your command>   # arrives as ${var}\n"
+            "    (an ADC credentials file — Google client libraries read it "
+            "directly; there is no env form of a bare access token)"
+        )
+        raise click.ClickException(
+            f"refusing to print a raw secret: ${marker} is set, so this looks like "
+            "an agent session where anything on stdout can be captured into a "
+            "transcript that outlives the command.\n"
+            "  Give the credential to the program instead of printing it:\n"
+            f"{substitute}\n"
+            f"{_HTTP_HINT_FOR[service]}\n"
+            "  Override once: MIEN_TOKEN=capture-ok mien token ... (or --force)."
+        )
+
     backend = load_backend(cfg.secrets_backend)
     if service == "google":
-        if not prof.google:
-            raise click.ClickException(f"profile {name!r} has no google identity")
-        g = prof.google
-        client_secret = backend.get(g.oauth_client_secret_ref).decode("utf-8")
-        refresh = backend.get(g.refresh_token_ref).decode("utf-8")
+        client_secret = backend.get(identity.oauth_client_secret_ref).decode("utf-8")
+        refresh = backend.get(identity.refresh_token_ref).decode("utf-8")
         access = exchange_refresh_token(
-            client_id=g.oauth_client_id,
+            client_id=identity.oauth_client_id,
             client_secret=client_secret,
             refresh_token=refresh,
         )
         click.echo(access)
-    elif service == "atlassian":
-        if not prof.atlassian:
-            raise click.ClickException(f"profile {name!r} has no atlassian identity")
-        token = backend.get(prof.atlassian.api_token_ref).decode("utf-8").strip()
-        click.echo(token)
-    elif service == "notion":
-        if not prof.notion:
-            raise click.ClickException(f"profile {name!r} has no notion identity")
-        token = backend.get(prof.notion.api_token_ref).decode("utf-8").strip()
-        click.echo(token)
+    else:
+        click.echo(backend.get(identity.api_token_ref).decode("utf-8").strip())
 
 
 @main.command("logout")

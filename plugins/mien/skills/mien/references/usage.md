@@ -71,10 +71,22 @@ has already been discarded — silently. Prefer a stateless form:
 mien run -- gh pr list                 # if the directory pins an identity
 mien exec personal -- gh pr list       # otherwise, name it
 
-# capture the token; never let it reach stdout on its own
-TOKEN=$(mien token google --profile personal) && curl -s -H "Authorization: Bearer $TOKEN" \
-  'https://gmail.googleapis.com/gmail/v1/users/me/profile'
+# for an HTTP call, let the child shell expand the credential — quote with '…' so
+# your shell doesn't. The secret never reaches stdout or the transcript; it does
+# still appear in the child's argv (`ps`), the same as any curl -H form.
+mien exec personal -- sh -c 'curl -s -H "Authorization: Bearer $NOTION_TOKEN" \
+  -H "Notion-Version: 2022-06-28" https://api.notion.com/v1/users/me'
+mien exec personal -- sh -c 'curl -s -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN" \
+  "$ATLASSIAN_BASE_URL/rest/api/3/issue/PROJ-123"'   # Atlassian is Basic, not Bearer
+mien exec personal -- sh -c 'curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+  "https://gmail.googleapis.com/gmail/v1/users/me/profile"'
 ```
+
+Google is the one service with no bare-token variable — `mien exec` gives it
+`GOOGLE_APPLICATION_CREDENTIALS`, an ADC *file path* a client library reads directly, so
+the token is minted from it in the child above. `mien token google` still prints one, but that is
+the case its harness refusal covers: from an agent it needs `--force` or
+`MIEN_TOKEN=capture-ok`.
 
 If a sequence genuinely needs one shell, keep the `eval` and the commands in a single
 invocation. See the skill's *Activation pattern* section.

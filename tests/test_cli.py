@@ -1483,6 +1483,184 @@ def test_token_notion_prints_api_token(runner, mien_cfg, mocker):
     assert "my-secret-notion-token" in result.output
 
 
+def _notion_profile(runner, mocker, secret=b"my-secret-notion-token"):
+    """A configured profile whose notion token is `secret`."""
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://notion-token"
+    backend.get.return_value = secret
+    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(
+        main,
+        ["login", "personal", "--service", "notion", "--token-stdin"],
+        input="y\n" + secret.decode() + "\n",
+    )
+
+
+def test_token_refuses_where_stdout_is_recorded(runner, mien_cfg, mocker):
+    """The accident this guards: a secret printed into an agent transcript.
+
+    Piping `mien token` into a program lets any echo of its input (a traceback, a
+    usage error) capture the secret durably. The refusal points at `mien exec`,
+    which hands the credential over in the environment instead.
+    """
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code != 0
+    assert "my-secret-notion-token" not in result.output  # the point of all this
+    assert "mien exec" in result.output
+    assert "NOTION_TOKEN" in result.output
+    assert "Bearer $NOTION_TOKEN" in result.output  # Notion really is Bearer
+    assert "CLAUDECODE" in result.output
+
+
+def _atlassian_profile(runner, mocker, secret=b"my-secret-api-token"):
+    """A configured profile whose atlassian API token is `secret`."""
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://atl-token"
+    backend.get.return_value = secret
+    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(
+        main,
+        [
+            "login", "personal", "--service", "atlassian",
+            "--atlassian-email", "me@company.com",
+            "--base-url", "https://company.atlassian.net",
+            "--token-stdin",
+        ],
+        input="y\n" + secret.decode() + "\n",
+    )
+
+
+def test_token_refusal_uses_basic_auth_for_atlassian(runner, mien_cfg, mocker):
+    """Atlassian Cloud authenticates with HTTP Basic (email:token), not Bearer.
+
+    A `Authorization: Bearer $ATLASSIAN_API_TOKEN` example would be advice that
+    never works, so the refusal must show the `curl -u` form the recipe uses.
+    """
+    _atlassian_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "atlassian"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code != 0
+    assert "my-secret-api-token" not in result.output
+    assert "ATLASSIAN_API_TOKEN" in result.output
+    assert 'curl -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN"' in result.output
+    assert "Bearer $ATLASSIAN_API_TOKEN" not in result.output
+
+
+def test_token_refusal_does_not_offer_google_adc_path_as_a_bearer_token(
+    runner, mien_cfg, mocker
+):
+    """$GOOGLE_APPLICATION_CREDENTIALS is a file path — Bearer-ing it always 401s.
+
+    The refusal already says there is no env form of a bare access token; the
+    HTTP hint must not then contradict it by sending the path as a token.
+    """
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.side_effect = ["ref://oauth", "ref://refresh"]
+    mocker.patch("mien.cli.google_installed_app_flow", return_value="refresh-zzz")
+    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(
+        main,
+        ["login", "personal", "--service", "google",
+         "--email", "me@x.com", "--client-id", "cid"],
+        input="y\ncsec\n",
+    )
+    result = runner.invoke(
+        main, ["token", "google"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code != 0
+    assert "Bearer $GOOGLE_APPLICATION_CREDENTIALS" not in result.output
+    assert "file path" in result.output
+    # Points at the honest remedies instead.
+    assert "gcloud auth application-default print-access-token" in result.output
+    assert "--force" in result.output
+
+
+def test_a_missing_identity_fails_loud_even_under_a_recorded_context(
+    runner, mien_cfg, mocker
+):
+    """The identity check must outrank the capture refusal.
+
+    Refusing first would answer "this profile has no notion identity" with
+    advice to read `$NOTION_TOKEN` — a variable `mien exec` never sets for such
+    a profile. Since `exec` overlays the environment without scrubbing, another
+    identity's ambient token could satisfy that advice and the call would
+    succeed as the wrong person. Misconfiguration must stay loud.
+    """
+    _atlassian_profile(runner, mocker)  # 'personal' exists, but has no notion
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code != 0
+    assert "has no notion identity" in result.output
+    assert "NOTION_TOKEN" not in result.output  # not the refusal's advice
+
+
+@pytest.mark.parametrize("override", [
+    {"MIEN_TOKEN": "capture-ok"},
+    {"MIEN_TOKEN": "off"},
+])
+def test_token_capture_refusal_is_overridable(runner, mien_cfg, mocker, override):
+    """Guides rather than traps — the same doctrine as `mien guard`."""
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1", **override},
+    )
+    assert result.exit_code == 0, result.output
+    assert "my-secret-notion-token" in result.output
+
+
+def test_token_capture_refusal_is_overridable_by_force_flag(runner, mien_cfg, mocker):
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion", "--force"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code == 0, result.output
+    assert "my-secret-notion-token" in result.output
+
+
+def test_token_prints_normally_outside_a_recorded_context(runner, mien_cfg, mocker):
+    """No harness marker, no refusal: a human at a terminal is unaffected."""
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg)},
+    )
+    assert result.exit_code == 0, result.output
+    assert "my-secret-notion-token" in result.output
+
+
+def test_token_refusal_precedes_touching_the_secrets_backend(runner, mien_cfg, mocker):
+    """Refuse before minting: a blocked call must not spend a credential."""
+    _notion_profile(runner, mocker)
+    # Re-patch so the mock counts only this invocation, not the setup above.
+    backend = mocker.patch("mien.cli.load_backend")
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    # Pin *why* it stopped: the refusal, not some unrelated early failure.
+    assert result.exit_code != 0
+    assert "refusing to print a raw secret" in result.output
+    backend.assert_not_called()
+
+
 def _pinned_config(tmp_path, monkeypatch, **scopes):
     """Write a config whose profiles claim directories via default_for."""
     from mien.config import BackendConfig, Config, Profile, SecretNaming, save_config

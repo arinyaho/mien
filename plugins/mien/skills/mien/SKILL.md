@@ -59,11 +59,13 @@ $MIEN which                         # profile claimed by the current directory
 $MIEN claim <profile>               # bind THIS workspace to a profile via a local .mien (writes, approves, git-ignores)
 $MIEN allow                         # approve an existing .mien so it can drive identity here
 $MIEN run -- <cmd...>               # run cmd as that profile
-$MIEN token google --profile <p>    # mint a fresh google access token (for curl)
+$MIEN token google --profile <p>    # LAST RESORT: prints a raw secret on stdout; refuses under an agent harness
 $MIEN statusline                    # one-line identity segment for a Claude Code status line
 $MIEN prompt                        # same segment for a shell prompt (zsh RPROMPT / bash PS1)
 $MIEN guard                         # exit non-zero if the identity is confidently wrong for this repo
 ```
+
+**Never pipe a secret into a program — hand it over in the environment.** To give a command a credential, use `mien exec <profile> -- <cmd...>`: the secret arrives as an env var (`NOTION_TOKEN`, `ATLASSIAN_API_TOKEN`, `GH_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS`, …) and never reaches stdout, so it cannot land in the session transcript — some of those variables carry a path to a 0600 ephemeral file rather than the value itself. Do **not** do `mien token <svc> | <program>` — `token` prints a raw secret on stdout, and any program that echoes its input (a traceback, a usage error, a debug log) leaks it into the session transcript. `mien token` therefore refuses by default when it detects an agent harness — the built-in markers (`$CLAUDECODE`, `$CLAUDE_CODE_ENTRYPOINT`) are Claude Code's, and `MIEN_CAPTURED=1` extends the same refusal to any other harness — naming `mien exec` in the error; override with `MIEN_TOKEN=capture-ok` or `--force` only when a bare string is genuinely required. For a one-off HTTP call let the child shell expand it: `mien exec <p> -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'` — the value never transits the agent's own shell. It does still land in the child's argv (visible to `ps` on this machine), exactly as the old `TOKEN=$(…)` form did: this buys transcript safety, not argv safety. One caution: `exec` **overlays** the environment without scrubbing, so if the named profile has no such service mien sets nothing and an ambient value from another identity survives — the call then succeeds as the wrong person. `mien token` fails loud in that case (`profile 'p' has no notion identity`); when in doubt confirm with `mien whoami <profile>` before trusting an `exec` recipe.
 
 **Commit author is git's own job.** mien does not set `user.email` — git already does this natively with `includeIf` (`gitdir:` by directory, `hasconfig:remote.*.url:` by repo owner) pointing at a per-identity gitconfig. The scp `git@host:owner/` remote form needs its own `**host:owner/**` rule alongside the `**/*host/owner/**` one that covers https/ssh. To sharpen mien's own warning, add `git_email` to the profile in `~/.config/mien/config.json` (a hand-edited field, same as `owns_remotes`/`default_for`) — mien reads it only for the author cross-check, so `guard` and the status line warn when a commit's `user.email` disagrees with the identity acting here. Prevention is git's includeIf; `guard` is the backstop.
 
@@ -157,22 +159,29 @@ under *any* valid token and exit status alone gates nothing:
   && $MIEN run -- gh pr merge 123
 ```
 
-For Gmail/Calendar/Drive (no helper in v1 — use curl). Pass `--profile` explicitly so the
-call does not depend on ambient shell state:
+For Gmail/Calendar/Drive (no helper in v1). Google is the one service with no bare-token
+variable: `exec` exports `GOOGLE_APPLICATION_CREDENTIALS`, an ADC *file path*, which a
+Google client library reads directly — prefer that. For a raw HTTP call, let the child
+shell mint the token from that same ADC file so it never reaches your shell or the
+transcript:
 
 ```bash
-TOKEN=$($MIEN token google --profile work-foo)
-curl -s -H "Authorization: Bearer $TOKEN" \
-  'https://gmail.googleapis.com/gmail/v1/users/me/messages?q=from:foo'
+$MIEN exec work-foo -- sh -c 'curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+  "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=from:foo"'
 ```
+
+With no `gcloud` available, `$MIEN token google --profile work-foo` still mints a bare
+access token — but that is exactly the case the harness refusal covers, so it needs
+`--force` (or `MIEN_TOKEN=capture-ok`) and the secret lands on stdout.
 
 For Slack (multi-workspace per profile):
 
 ```bash
-eval "$($MIEN use work-foo)"      # same call: brings in MIEN_SLACK_TOKENS
-TOKEN=$(jq -r '."team-a"' "$MIEN_SLACK_TOKENS")
-curl -s -H "Authorization: Bearer $TOKEN" \
-  'https://slack.com/api/conversations.list'
+# $MIEN_SLACK_TOKENS is a path to a 0600 file; resolve the token in the child
+# shell so it never lands in the agent's own shell or the transcript
+$MIEN exec work-foo -- sh -c 'TOKEN=$(jq -r ".\"team-a\"" "$MIEN_SLACK_TOKENS");
+  curl -s -H "Authorization: Bearer $TOKEN" \
+    https://slack.com/api/conversations.list'
 ```
 
 If the profile has only one workspace, `$MIEN_SLACK_DEFAULT_TOKEN` is also exported.
@@ -180,23 +189,20 @@ If the profile has only one workspace, `$MIEN_SLACK_DEFAULT_TOKEN` is also expor
 For Atlassian (Jira/Confluence):
 
 ```bash
-TOKEN=$($MIEN token atlassian --profile work-foo)
-eval "$($MIEN use work-foo)"      # same call: brings in ATLASSIAN_EMAIL / _BASE_URL
-curl -s -u "$ATLASSIAN_EMAIL:$TOKEN" \
-  "$ATLASSIAN_BASE_URL/rest/api/3/issue/PROJ-123"
+$MIEN exec work-foo -- sh -c 'curl -s -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN" \
+  "$ATLASSIAN_BASE_URL/rest/api/3/issue/PROJ-123"'
 ```
 
-`ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`, and `ATLASSIAN_BASE_URL` are also exported directly by `mien use`.
+Atlassian Cloud is HTTP **Basic** (email:token), never Bearer. `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`, and `ATLASSIAN_BASE_URL` all arrive from `mien exec` (and `mien use`).
 
 For Notion:
 
 ```bash
-TOKEN=$($MIEN token notion --profile work-foo)
-curl -s -H "Authorization: Bearer $TOKEN" -H "Notion-Version: 2022-06-28" \
-  https://api.notion.com/v1/users/me
+$MIEN exec work-foo -- sh -c 'curl -s -H "Authorization: Bearer $NOTION_TOKEN" \
+  -H "Notion-Version: 2022-06-28" https://api.notion.com/v1/users/me'
 ```
 
-`NOTION_TOKEN` is also exported directly by `mien use`.
+`NOTION_TOKEN` arrives from `mien exec` (and is exported by `mien use`).
 
 For AWS:
 
@@ -218,7 +224,7 @@ $MIEN exec work-foo -- oci iam user get --user-id <ocid>   # uses OCI_CLI_PROFIL
 ## Important rules
 
 - **Never assume a profile is still active.** Environment set by an earlier tool call is gone (see *Activation pattern*). Every invocation must carry its own identity — via `mien exec`, an `eval` in that same invocation, or `--profile`. A command that "worked a moment ago" is not evidence the profile is still set.
-- **Never paste resolved tokens into the conversation.** Use shell expansion (`$GH_TOKEN`, `$($MIEN token google --profile <p>)`) so the token resolves at execution time and never appears in tool-call arguments.
+- **Never paste resolved tokens into the conversation.** Let the *child* shell expand them — `$MIEN exec <p> -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'` — so the value resolves inside the command that needs it and never appears in tool-call arguments, your own shell, or the transcript. `TOKEN=$($MIEN token …)` is not that: it resolves in *your* shell, which is why `token` refuses under an agent harness.
 - **Never run `mien use` bare** — always `eval` it (or use the `mien-use` wrapper). As an extra safety net `mien use` writes exports to a 0600 ephemeral file and only prints a `source …; rm …` one-liner, so a missed `eval` no longer leaks tokens to stdout. On a real TTY `mien use` refuses outright (use `mien-use` or `eval`).
 - **In a persistent human shell, pass an owner pid** — use the `mien-use` wrapper (it passes `$$`), or `eval "$(mien use --owner-pid $$ <profile>)"`. Without it the ephemeral files are keyed to mien's already-exited process, and a stray `mien doctor --gc` then deletes credentials the shell is still using. This does **not** apply to the single-call agent form above: that shell is short-lived and dies with the invocation, so keying the files to it or to mien amounts to the same thing, and they are meant to be reclaimed.
 - **Never run `mien login` yourself to enter a secret.** The agent's shell is non-interactive, so you would have to put the secret in the command — which lands in the session transcript and shell history. Instead:

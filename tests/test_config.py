@@ -139,6 +139,51 @@ def test_retired_fields_in_an_older_config_are_ignored():
     assert prof.slack == [SlackWorkspace(workspace="team-a", user_token_ref="r")]
 
 
+@pytest.mark.parametrize("service, block", [
+    ("aws", {"profile_name": "work"}),          # meant `profile`
+    ("oci", {"profil": "WORK"}),                # meant `profile`
+    ("github", {"ssh_keypath": "/k"}),          # meant `ssh_key_path`
+])
+def test_a_misspelled_service_key_still_fails_loudly(service, block):
+    """Tolerating retired keys must not become tolerating typos.
+
+    A dropped `profile` key leaves the service unconfigured, so mien exports no
+    `AWS_PROFILE`/`OCI_CLI_PROFILE` and the tool falls back to its own default
+    account — the command then succeeds as somebody else. Wrong identity is the
+    failure this project exists to prevent, so it has to be loud.
+    """
+    raw = {
+        "$schema_version": 1,
+        "secrets_backend": {"type": "macos_keychain"},
+        "bootstrap": {}, "secret_naming": {},
+        "profiles": {"work": {service: block}},
+    }
+    with pytest.raises(TypeError):
+        deserialize_config(raw)
+
+
+def test_a_retired_key_holding_a_meaningful_value_is_reported():
+    """`gcloud_login_required: true` once suppressed the ADC export.
+
+    Dropping it silently would start exporting GOOGLE_APPLICATION_CREDENTIALS
+    for a profile that had asked mien not to, changing behaviour without saying
+    so. Only the no-op value (False) is tolerated.
+    """
+    raw = {
+        "$schema_version": 1,
+        "secrets_backend": {"type": "macos_keychain"},
+        "bootstrap": {}, "secret_naming": {},
+        "profiles": {"work": {"google": {
+            "email": "me@x.example", "oauth_client_id": "cid",
+            "oauth_client_secret_ref": "s", "refresh_token_ref": "r",
+            "adc_ref": None, "gcloud_config_name": "work",
+            "default_project": None, "gcloud_login_required": True,
+        }}},
+    }
+    with pytest.raises(ValueError, match="no longer supported"):
+        deserialize_config(raw)
+
+
 def test_save_creates_parent_dir_and_chmods_600(monkeypatch, tmp_path):
     target = tmp_path / "deep" / "nested" / "config.json"
     monkeypatch.setenv("MIEN_CONFIG", str(target))

@@ -208,15 +208,39 @@ def _glob_list_from_raw(
     return list(value)
 
 
-def _service_from_dict(cls, data: dict):
-    """Build a service dataclass, dropping keys it no longer declares.
+# Keys a service block may still carry from an older mien, and the value each
+# one had to hold for its removal to be a no-op. Deliberately an explicit map
+# rather than "drop anything unrecognized": an unknown key is far more likely a
+# typo (`profil`, `ssh_keypath`) than a retired field, and silently dropping it
+# would leave the service unconfigured — no `AWS_PROFILE`/`OCI_CLI_PROFILE`
+# exported, the tool falling back to its own default account, and the command
+# succeeding as somebody else. A misconfigured identity has to fail loudly.
+_RETIRED_SERVICE_KEYS: dict[type, dict[str, object]] = {
+    GoogleService: {"gcloud_login_required": False},
+    SlackWorkspace: {"team_id": None},
+}
 
-    A config written by an older mien can carry fields that have since been
-    retired; those are dead weight, not an error, so loading ignores them
-    instead of failing with an unexpected-keyword TypeError.
+
+def _service_from_dict(cls, data: dict):
+    """Build a service dataclass, tolerating only known-retired keys.
+
+    A retired key is dropped when it holds the value that made it a no-op. Any
+    other value meant something once, so it is reported rather than ignored —
+    silently discarding it would change behaviour without saying so.
     """
-    known = {f.name for f in fields(cls)}
-    return cls(**{k: v for k, v in data.items() if k in known})
+    retired = _RETIRED_SERVICE_KEYS.get(cls, {})
+    cleaned = {}
+    for k, v in data.items():
+        if k in retired:
+            if v != retired[k]:
+                raise ValueError(
+                    f"{cls.__name__}: {k!r}={v!r} is no longer supported "
+                    f"(only {retired[k]!r} was ever written). Remove it from your "
+                    "config, or check whether you meant a different setting."
+                )
+            continue
+        cleaned[k] = v
+    return cls(**cleaned)
 
 
 def _config_from_dict(raw: dict) -> Config:

@@ -138,6 +138,7 @@ def deserialize_config(raw: str | dict) -> Config:
             raise ConfigError(f"invalid config JSON: {exc}") from exc
     else:
         data = raw
+    data = _mapping_from_raw("config", data)
     version = data.get("$schema_version", data.get("schema_version"))
     if version != SCHEMA_VERSION:
         raise ConfigError(
@@ -208,6 +209,34 @@ def _glob_list_from_raw(
                 f"strings, got {type(item).__name__}: {item!r}"
             )
     return list(value)
+
+
+def _mapping_from_raw(where: str, value: object) -> dict:
+    """Validate that a config block is a JSON object instead of assuming it is.
+
+    Every block below is read with ``.items()``, ``in``, or ``dict()``, so a
+    wrong-typed value would escape as ``TypeError``/``AttributeError`` rather
+    than ``ConfigError`` -- and the fail-open surfaces (guard, status line) only
+    recognize ``ConfigError`` as "I have stopped working", so anything else exits
+    in silence. Same shape-check-don't-coerce rule as ``_glob_list_from_raw``.
+    """
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{where} must be a JSON object, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
+def _object_list_from_raw(where: str, value: object) -> list[dict]:
+    """Validate a config block that is a list of JSON objects. See above."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"{where} must be a list of JSON objects, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    return [_mapping_from_raw(f"{where}[{i}]", item) for i, item in enumerate(value)]
 
 
 class ConfigError(ValueError):
@@ -285,8 +314,16 @@ def _service_from_dict(cls, data: dict):
         ) from exc
 
 
+def _service_from_raw(cls, profile_name: str, key: str, value: object):
+    """Build an optional service block, checking its shape first."""
+    if not value:
+        return None
+    return _service_from_dict(
+        cls, _mapping_from_raw(f"profile {profile_name!r}: {key}", value))
+
+
 def _config_from_dict(raw: dict) -> Config:
-    sb_raw = dict(raw.get("secrets_backend", {}))
+    sb_raw = dict(_mapping_from_raw("secrets_backend", raw.get("secrets_backend") or {}))
     if "type" not in sb_raw:
         raise ConfigError(
             "secrets_backend.type is missing — mien cannot tell where your "
@@ -295,29 +332,37 @@ def _config_from_dict(raw: dict) -> Config:
     sb_type = sb_raw.pop("type")
     secrets_backend = BackendConfig(type=sb_type, options=sb_raw)
 
-    sn = raw.get("secret_naming") or {}
+    sn = _mapping_from_raw("secret_naming", raw.get("secret_naming") or {})
     secret_naming = SecretNaming(
         default=sn.get("default", "mien-{profile}-{service}-{kind}"),
         slack_token=sn.get("slack_token", "mien-{profile}-slack-{workspace}-token"),
     )
 
     profiles: dict[str, Profile] = {}
-    for name, p in (raw.get("profiles") or {}).items():
+    for name, p in _mapping_from_raw("profiles", raw.get("profiles") or {}).items():
+        p = _mapping_from_raw(f"profile {name!r}", p)
         _check_profile_keys(name, p)
-        google = _service_from_dict(GoogleService, p["google"]) if p.get("google") else None
-        github = _service_from_dict(GitHubService, p["github"]) if p.get("github") else None
-        slack = [_service_from_dict(SlackWorkspace, w) for w in (p.get("slack") or [])]
-        aws = _service_from_dict(AWSService, p["aws"]) if p.get("aws") else None
-        oci = _service_from_dict(OCIService, p["oci"]) if p.get("oci") else None
-        atlassian = _service_from_dict(AtlassianService, p["atlassian"]) if p.get("atlassian") else None
-        notion = _service_from_dict(NotionService, p["notion"]) if p.get("notion") else None
+        google = _service_from_raw(GoogleService, name, "google", p.get("google"))
+        github = _service_from_raw(GitHubService, name, "github", p.get("github"))
+        slack = [
+            _service_from_dict(SlackWorkspace, w)
+            for w in _object_list_from_raw(f"profile {name!r}: slack", p.get("slack"))
+        ]
+        aws = _service_from_raw(AWSService, name, "aws", p.get("aws"))
+        oci = _service_from_raw(OCIService, name, "oci", p.get("oci"))
+        atlassian = _service_from_raw(AtlassianService, name, "atlassian", p.get("atlassian"))
+        notion = _service_from_raw(NotionService, name, "notion", p.get("notion"))
         project_env = []
-        for s_ in (p.get("project_env") or []):
+        for s_ in _object_list_from_raw(f"profile {name!r}: project_env", p.get("project_env")):
             if "match" not in s_:
                 raise ConfigError(
                     f"profile {name!r}: a project_env entry has no 'match' glob: {s_!r}")
-            project_env.append(
-                ProjectEnvScope(match=s_["match"], env=dict(s_.get("env") or {})))
+            project_env.append(ProjectEnvScope(
+                match=s_["match"],
+                env=dict(_mapping_from_raw(
+                    f"profile {name!r}: project_env {s_['match']!r} env",
+                    s_.get("env") or {})),
+            ))
         profiles[name] = Profile(
             name=name,
             google=google,
@@ -338,7 +383,7 @@ def _config_from_dict(raw: dict) -> Config:
     return Config(
         schema_version=SCHEMA_VERSION,
         secrets_backend=secrets_backend,
-        bootstrap=raw.get("bootstrap") or {},
+        bootstrap=_mapping_from_raw("bootstrap", raw.get("bootstrap") or {}),
         secret_naming=secret_naming,
         profiles=profiles,
     )

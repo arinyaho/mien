@@ -319,6 +319,43 @@ def test_default_for_missing_defaults_empty():
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "profiles": {"w": {"defualt_for": ["/x"]}}}',
      "unknown key"),
+    # Wrong-typed blocks: every one of these is read as a dict/list further down.
+    ('["not", "a", "config"]', "config must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": "keyring"}',
+     "secrets_backend must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "bootstrap": "me@example.com"}',
+     "bootstrap must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "secret_naming": "mien-{profile}"}',
+     "secret_naming must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": ["work"]}',
+     "profiles must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": null}}',
+     "profile 'work' must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"github": "octocat"}}}',
+     "profile 'work': github must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"aws": ["eu-west-1"]}}}',
+     "profile 'work': aws must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"slack": "team-a"}}}',
+     "profile 'work': slack must be a list"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"slack": ["team-a"]}}}',
+     r"profile 'work': slack\[0\] must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": {"match": "*"}}}}',
+     "profile 'work': project_env must be a list"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": ["*/acme/*"]}}}',
+     r"profile 'work': project_env\[0\] must be a JSON object"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": [{"match": "*", "env": "A=1"}]}}}',
+     "profile 'work': project_env '\\*' env must be a JSON object"),
 ])
 def test_every_way_a_config_breaks_is_a_configerror(raw, expect):
     """One type for every parse failure, so the CLI can report them all.

@@ -135,12 +135,13 @@ def deserialize_config(raw: str | dict) -> Config:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid config JSON: {exc}") from exc
+            raise ConfigError(f"invalid config JSON: {exc}") from exc
     else:
         data = raw
     version = data.get("$schema_version", data.get("schema_version"))
     if version != SCHEMA_VERSION:
-        raise ValueError(f"Unsupported schema_version {version!r}; expected {SCHEMA_VERSION}")
+        raise ConfigError(
+            f"Unsupported schema_version {version!r}; expected {SCHEMA_VERSION}")
     return _config_from_dict(data)
 
 
@@ -196,13 +197,13 @@ def _glob_list_from_raw(
     if value is None:
         return []
     if not isinstance(value, list):
-        raise ValueError(
+        raise ConfigError(
             f"profile {profile_name!r}: {field_name} must be a list of {kind} glob "
             f"strings (e.g. [{example!r}]), got {type(value).__name__}: {value!r}"
         )
     for item in value:
         if not isinstance(item, str):
-            raise ValueError(
+            raise ConfigError(
                 f"profile {profile_name!r}: {field_name} entries must be {kind} glob "
                 f"strings, got {type(item).__name__}: {item!r}"
             )
@@ -225,6 +226,28 @@ class ConfigError(ValueError):
 # would leave the service unconfigured — no `AWS_PROFILE`/`OCI_CLI_PROFILE`
 # exported, the tool falling back to its own default account, and the command
 # succeeding as somebody else. A misconfigured identity has to fail loudly.
+# Profile-level keys an older config may still carry, with the value that made
+# each a no-op. Same reasoning as the service-level map below.
+_RETIRED_PROFILE_KEYS: dict[str, object] = {"git_name": None}
+
+
+def _check_profile_keys(name: str, p: dict) -> None:
+    """Reject a profile key mien does not recognize.
+
+    A typo here is the quietest way to act as the wrong person: `defualt_for`
+    simply drops the directory claim, and the directory then falls to some other
+    profile's catch-all glob. Nothing warns, and the wrong identity acts.
+    """
+    known = {f.name for f in dc_fields(Profile)} - {"name"}
+    for k in p:
+        if k in known or k in _RETIRED_PROFILE_KEYS:
+            continue
+        raise ConfigError(
+            f"profile {name!r}: unknown key {k!r}. Valid keys are: "
+            f"{', '.join(sorted(known))}."
+        )
+
+
 _RETIRED_SERVICE_KEYS: dict[type, dict[str, object]] = {
     GoogleService: {"gcloud_login_required": False},
     SlackWorkspace: {"team_id": None},
@@ -264,6 +287,11 @@ def _service_from_dict(cls, data: dict):
 
 def _config_from_dict(raw: dict) -> Config:
     sb_raw = dict(raw.get("secrets_backend", {}))
+    if "type" not in sb_raw:
+        raise ConfigError(
+            "secrets_backend.type is missing — mien cannot tell where your "
+            "secrets live. Expected one of: gcp_secret_manager, macos_keychain, "
+            "keyring.")
     sb_type = sb_raw.pop("type")
     secrets_backend = BackendConfig(type=sb_type, options=sb_raw)
 
@@ -275,6 +303,7 @@ def _config_from_dict(raw: dict) -> Config:
 
     profiles: dict[str, Profile] = {}
     for name, p in (raw.get("profiles") or {}).items():
+        _check_profile_keys(name, p)
         google = _service_from_dict(GoogleService, p["google"]) if p.get("google") else None
         github = _service_from_dict(GitHubService, p["github"]) if p.get("github") else None
         slack = [_service_from_dict(SlackWorkspace, w) for w in (p.get("slack") or [])]
@@ -282,10 +311,13 @@ def _config_from_dict(raw: dict) -> Config:
         oci = _service_from_dict(OCIService, p["oci"]) if p.get("oci") else None
         atlassian = _service_from_dict(AtlassianService, p["atlassian"]) if p.get("atlassian") else None
         notion = _service_from_dict(NotionService, p["notion"]) if p.get("notion") else None
-        project_env = [
-            ProjectEnvScope(match=s["match"], env=dict(s.get("env") or {}))
-            for s in (p.get("project_env") or [])
-        ]
+        project_env = []
+        for s_ in (p.get("project_env") or []):
+            if "match" not in s_:
+                raise ConfigError(
+                    f"profile {name!r}: a project_env entry has no 'match' glob: {s_!r}")
+            project_env.append(
+                ProjectEnvScope(match=s_["match"], env=dict(s_.get("env") or {})))
         profiles[name] = Profile(
             name=name,
             google=google,

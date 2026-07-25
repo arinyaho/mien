@@ -304,3 +304,39 @@ def test_default_for_missing_defaults_empty():
     raw = _raw_with_default_for(None)
     raw["profiles"]["work"].pop("default_for")
     assert deserialize_config(raw).profiles["work"].default_for == []
+
+
+@pytest.mark.parametrize("raw, expect", [
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},',  # trailing comma
+     "invalid config JSON"),
+    ('{"$schema_version": 2, "secrets_backend": {"type": "keyring"}}',
+     "Unsupported schema_version"),
+    ('{"$schema_version": 1, "secrets_backend": {"project": "p"}}',
+     "secrets_backend.type is missing"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"w": {"default_for": "a-string"}}}',
+     "must be a list"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"w": {"defualt_for": ["/x"]}}}',
+     "unknown key"),
+])
+def test_every_way_a_config_breaks_is_a_configerror(raw, expect):
+    """One type for every parse failure, so the CLI can report them all.
+
+    ConfigError is what `mien guard` keys off to announce that it has stopped
+    enforcing. A parse failure that escapes as a bare ValueError/KeyError makes
+    the guard exit 0 in silence — the mis-authored commit this tool prevents.
+    """
+    with pytest.raises(ConfigError, match=expect):
+        deserialize_config(raw)
+
+
+def test_a_retired_profile_key_still_loads():
+    """`git_name` was removed; a config written before that must still open."""
+    raw = {
+        "$schema_version": 1,
+        "secrets_backend": {"type": "keyring"},
+        "profiles": {"w": {"git_name": "Me", "owns_remotes": ["github.com/me/*"]}},
+    }
+    prof = deserialize_config(raw).profiles["w"]
+    assert prof.owns_remotes == ["github.com/me/*"]

@@ -1484,16 +1484,22 @@ def prompt_cmd() -> None:
         # bash
         PROMPT_COMMAND='PS1="… $(mien prompt) "'
 
-    Secret-free and never errors — prints nothing on any failure, and nothing
-    when mien is unconfigured — so it is safe to run on every prompt.
+    Secret-free and never errors — prints nothing when mien is unconfigured or
+    on an unexpected failure, so it is safe to run on every prompt. An
+    unreadable config shows a compact marker instead of staying blank, because
+    a blank segment reads as "nothing to report" when in fact mien can no
+    longer tell who you are here.
     """
     try:
         cfg = load_config()
         if cfg is None:
             return
         click.echo(_identity_segment(cfg, _logical_cwd()), nl=False)
-    except ConfigError as exc:
-        click.echo(f"mien: config unreadable — {exc}", err=True)
+    except ConfigError:
+        # Deliberately stdout, not stderr: a prompt redraws constantly and its
+        # stderr goes straight to the terminal, so a full message there would
+        # spam every redraw. The marker rides along in the segment instead.
+        click.echo("\033[31m⚠mien:config\033[0m", nl=False)
     except Exception:
         return
 

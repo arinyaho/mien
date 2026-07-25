@@ -1513,7 +1513,69 @@ def test_token_refuses_where_stdout_is_recorded(runner, mien_cfg, mocker):
     assert "my-secret-notion-token" not in result.output  # the point of all this
     assert "mien exec" in result.output
     assert "NOTION_TOKEN" in result.output
+    assert "Bearer $NOTION_TOKEN" in result.output  # Notion really is Bearer
     assert "CLAUDECODE" in result.output
+
+
+def _atlassian_profile(runner, mocker, secret=b"my-secret-api-token"):
+    """A configured profile whose atlassian API token is `secret`."""
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://atl-token"
+    backend.get.return_value = secret
+    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(
+        main,
+        [
+            "login", "personal", "--service", "atlassian",
+            "--atlassian-email", "me@company.com",
+            "--base-url", "https://company.atlassian.net",
+            "--token-stdin",
+        ],
+        input="y\n" + secret.decode() + "\n",
+    )
+
+
+def test_token_refusal_uses_basic_auth_for_atlassian(runner, mien_cfg, mocker):
+    """Atlassian Cloud authenticates with HTTP Basic (email:token), not Bearer.
+
+    A `Authorization: Bearer $ATLASSIAN_API_TOKEN` example would be advice that
+    never works, so the refusal must show the `curl -u` form the recipe uses.
+    """
+    _atlassian_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "atlassian"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code != 0
+    assert "my-secret-api-token" not in result.output
+    assert "ATLASSIAN_API_TOKEN" in result.output
+    assert 'curl -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN"' in result.output
+    assert "Bearer $ATLASSIAN_API_TOKEN" not in result.output
+
+
+def test_token_refusal_does_not_offer_google_adc_path_as_a_bearer_token(
+    runner, mien_cfg, mocker
+):
+    """$GOOGLE_APPLICATION_CREDENTIALS is a file path — Bearer-ing it always 401s.
+
+    The refusal already says there is no env form of a bare access token; the
+    HTTP hint must not then contradict it by sending the path as a token.
+    """
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://g"
+    runner.invoke(main, ["init"], input="3\nmien-\n")
+    result = runner.invoke(
+        main, ["token", "google"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code != 0
+    assert "Bearer $GOOGLE_APPLICATION_CREDENTIALS" not in result.output
+    assert "file path" in result.output
+    # Points at the honest remedies instead.
+    assert "gcloud auth print-access-token" in result.output
+    assert "--force" in result.output
 
 
 @pytest.mark.parametrize("override", [

@@ -1514,6 +1514,36 @@ _EXEC_ENV_FOR = {
     "google": "GOOGLE_APPLICATION_CREDENTIALS",
 }
 
+# The shape each service's credential actually takes on the wire, so the
+# refusal's one-off example is correct rather than merely plausible. Notion is
+# `Authorization: Bearer`; Atlassian Cloud is HTTP Basic (email:token), never
+# Bearer; and google has no bearer-token variable at all — its `exec` substitute
+# is an ADC file path, so sending it as a Bearer token would always 401. Google
+# therefore gets an honest remedy in place of an example.
+_HTTP_HINT_FOR = {
+    "notion": (
+        "  For a one-off HTTP call, let the child shell expand it:\n"
+        "    mien exec <profile> -- sh -c 'curl -H \"Authorization: Bearer "
+        "$NOTION_TOKEN\" -H \"Notion-Version: 2022-06-28\" "
+        "https://api.notion.com/v1/users/me'"
+    ),
+    "atlassian": (
+        "  For a one-off HTTP call, let the child shell expand it — Atlassian "
+        "Cloud uses HTTP Basic, not Bearer:\n"
+        "    mien exec <profile> -- sh -c 'curl -u "
+        "\"$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN\" "
+        "\"$ATLASSIAN_BASE_URL/rest/api/3/issue/PROJ-123\"'"
+    ),
+    "google": (
+        "  There is no bare-token variable to send in a header: "
+        "$GOOGLE_APPLICATION_CREDENTIALS is a file path, not a token. Let a "
+        "Google client library read it directly under `mien exec`; if you truly "
+        "need the string, use --force here, or:\n"
+        "    mien exec <profile> -- sh -c 'curl -H \"Authorization: Bearer "
+        "$(gcloud auth print-access-token)\" ...'"
+    ),
+}
+
 
 def capture_context() -> str | None:
     """The harness marker suggesting this command's stdout is being recorded."""
@@ -1633,9 +1663,7 @@ def token_cmd(service: str, profile: str | None, force: bool) -> None:
             "transcript that outlives the command.\n"
             "  Give the credential to the program instead of printing it:\n"
             f"{substitute}\n"
-            "  For a one-off HTTP call, let the child shell expand it:\n"
-            "    mien exec <profile> -- sh -c 'curl -H \"Authorization: Bearer "
-            f"${var}\" ...'\n"
+            f"{_HTTP_HINT_FOR[service]}\n"
             "  Override once: MIEN_TOKEN=capture-ok mien token ... (or --force)."
         )
     cfg = _require_config()

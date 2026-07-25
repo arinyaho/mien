@@ -248,16 +248,13 @@ class ConfigError(ValueError):
     """
 
 
-# Keys a service block may still carry from an older mien, and the value each
-# one had to hold for its removal to be a no-op. Deliberately an explicit map
-# rather than "drop anything unrecognized": an unknown key is far more likely a
-# typo (`profil`, `ssh_keypath`) than a retired field, and silently dropping it
-# would leave the service unconfigured — no `AWS_PROFILE`/`OCI_CLI_PROFILE`
-# exported, the tool falling back to its own default account, and the command
-# succeeding as somebody else. A misconfigured identity has to fail loudly.
-# Profile-level keys an older config may still carry, with the value that made
-# each a no-op. Same reasoning as the service-level map below.
-_RETIRED_PROFILE_KEYS: dict[str, object] = {"git_name": None}
+# Profile-level keys an older config may still carry. Tolerated by name alone,
+# whatever value they hold: `git_name` was never read by any code path, so a
+# config that set it to a real name was already getting nothing from it, and
+# rejecting such a config now would break configs that worked. Still an explicit
+# list rather than "drop anything unrecognized" — see `_check_profile_keys` for
+# why an unknown profile key must fail loudly.
+_RETIRED_PROFILE_KEYS: frozenset[str] = frozenset({"git_name"})
 
 
 def _check_profile_keys(name: str, p: dict) -> None:
@@ -277,6 +274,13 @@ def _check_profile_keys(name: str, p: dict) -> None:
         )
 
 
+# Keys a service block may still carry from an older mien, and the value each
+# one had to hold for its removal to be a no-op. Deliberately an explicit map
+# rather than "drop anything unrecognized": an unknown key is far more likely a
+# typo (`profil`, `ssh_keypath`) than a retired field, and silently dropping it
+# would leave the service unconfigured — no `AWS_PROFILE`/`OCI_CLI_PROFILE`
+# exported, the tool falling back to its own default account, and the command
+# succeeding as somebody else. A misconfigured identity has to fail loudly.
 _RETIRED_SERVICE_KEYS: dict[type, dict[str, object]] = {
     GoogleService: {"gcloud_login_required": False},
     SlackWorkspace: {"team_id": None},

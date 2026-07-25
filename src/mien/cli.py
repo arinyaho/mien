@@ -72,7 +72,8 @@ def _friendly_backend_message(exc: BaseException) -> str | None:
             f"{exc}\n\n"
             f"The config is at {config_path()}.\n"
             "Until it parses, mien cannot tell which identity is which — so the "
-            "status line stays blank and `mien guard` stops enforcing."
+            "status line shows a warning in place of your identity, and `mien "
+            "guard` stops enforcing (it says so instead of blocking)."
         )
 
     try:
@@ -1455,17 +1456,23 @@ def statusline_cmd() -> None:
     Secret-free and offline: it reads only the config's profile names and scopes,
     never the backend, so it is cheap enough to run at status-line frequency. And
     it never errors out — a status line that crashes is worse than a blank one —
-    so any failure (no config, unreadable input) prints nothing and exits 0.
+    so any failure exits 0: no config or unreadable input prints nothing. An
+    unreadable config is the one exception: it shows a compact marker instead of
+    staying blank, because a blank segment reads as "nothing to report" when in
+    fact mien can no longer tell who you are here.
     """
     try:
         cfg = load_config()
         if cfg is None:
             return  # mien is not set up here — stay silent rather than nag.
         click.echo(_identity_segment(cfg, _statusline_cwd()))
-    except ConfigError as exc:
-        # Say so rather than going blank: an empty segment reads as "nothing to
-        # report", when in fact mien can no longer tell who you are here.
-        click.echo(f"mien: config unreadable — {exc}", err=True)
+    except ConfigError:
+        # Deliberately stdout, not stderr: Claude Code renders this command's
+        # stdout as the status line and discards the rest, so a message on
+        # stderr would leave the segment blank — the very silence this exists to
+        # break. Compact by necessity too: it has to fit one status-line row, so
+        # it points at `mien doctor` rather than carrying the parse error.
+        click.echo("\033[31m⚠ mien:config unreadable — run 'mien doctor'\033[0m")
     except Exception:
         return
 

@@ -196,6 +196,24 @@ def test_statusline_is_silent_without_a_config(tmp_path, monkeypatch):
     assert result.output.strip() == ""
 
 
+def test_statusline_says_so_on_an_unreadable_config(tmp_path, monkeypatch):
+    # A config that exists but does not parse is not "nothing to report" — mien
+    # can no longer tell who you are here, and the status line must say so. It
+    # has to land on stdout: that is the stream Claude Code renders.
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{ not json")
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+    monkeypatch.delenv("MIEN_PROFILE", raising=False)
+    result = CliRunner().invoke(
+        main, ["statusline"],
+        input=json.dumps({"workspace": {"current_dir": "/w/acme/repo"}}),
+    )
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout
+    assert result.stderr.strip() == ""
+    assert result.stdout.count("\n") == 1  # one status-line row, not a report
+
+
 def test_statusline_flags_a_stale_active_profile(tmp_path, monkeypatch):
     _write_cfg(tmp_path, monkeypatch, work=["*/acme/*"])
     result = _run("/w/acme/repo", monkeypatch, mien_profile="deleted-profile")

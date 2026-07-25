@@ -1648,13 +1648,16 @@ def test_token_prints_normally_outside_a_recorded_context(runner, mien_cfg, mock
 def test_token_refusal_precedes_touching_the_secrets_backend(runner, mien_cfg, mocker):
     """Refuse before minting: a blocked call must not spend a credential."""
     _notion_profile(runner, mocker)
+    # Re-patch so the mock counts only this invocation, not the setup above.
     backend = mocker.patch("mien.cli.load_backend")
-    backend.reset_mock()
-    runner.invoke(
+    result = runner.invoke(
         main, ["token", "notion"],
         env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
              "CLAUDECODE": "1"},
     )
+    # Pin *why* it stopped: the refusal, not some unrelated early failure.
+    assert result.exit_code != 0
+    assert "refusing to print a raw secret" in result.output
     backend.assert_not_called()
 
 

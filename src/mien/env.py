@@ -29,11 +29,7 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
         bundle.env["CLOUDSDK_ACTIVE_CONFIG_NAME"] = g.gcloud_config_name
         if g.default_project:
             bundle.env["CLOUDSDK_CORE_PROJECT"] = g.default_project
-        if (
-            g.refresh_token_ref
-            and g.oauth_client_secret_ref
-            and not g.gcloud_login_required
-        ):
+        if g.refresh_token_ref and g.oauth_client_secret_ref:
             refresh = backend.get(g.refresh_token_ref).decode("utf-8").strip()
             client_secret = backend.get(g.oauth_client_secret_ref).decode("utf-8").strip()
             adc_payload = json.dumps(

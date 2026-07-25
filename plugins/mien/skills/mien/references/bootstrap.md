@@ -54,21 +54,12 @@ gcloud projects list --account="$BOOTSTRAP_EMAIL"
 
 The `PROJECT_ID` column is what you want.
 
-## OCI Vault
-
-Requires `~/.oci/config` with API key PEM, and a Vault + Compartment created in the OCI console.
-
-```bash
-mien init  # pick (2), supply vault OCID, compartment OCID, region
-mien doctor
-```
-
 ## macOS Keychain
 
 Zero setup beyond a logged-in user.
 
 ```bash
-mien init  # pick (3), service prefix defaults to "mien-"
+mien init  # pick (2), service prefix defaults to "mien-"
 mien doctor
 ```
 
@@ -77,6 +68,6 @@ mien doctor
 Free, no cloud, no macOS. Requires a running desktop Secret Service (GNOME Keyring, KWallet, or Windows Credential Locker). Does NOT work on headless servers.
 
 ```bash
-mien init  # pick (4), service prefix defaults to "mien-"
+mien init  # pick (3), service prefix defaults to "mien-"
 mien doctor
 ```

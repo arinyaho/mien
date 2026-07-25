@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -29,7 +29,6 @@ class GoogleService:
     adc_ref: str | None
     gcloud_config_name: str
     default_project: str | None
-    gcloud_login_required: bool = False
 
 
 @dataclass
@@ -44,7 +43,6 @@ class GitHubService:
 @dataclass
 class SlackWorkspace:
     workspace: str
-    team_id: str | None
     user_token_ref: str
 
 
@@ -108,7 +106,6 @@ class Profile:
     # commit's `user.email` disagrees with the identity acting here. Set it when
     # you commit under an address none of the profile's accounts carry.
     git_email: str | None = None
-    git_name: str | None = None
 
 
 @dataclass
@@ -175,7 +172,6 @@ def _config_to_dict(cfg: Config) -> dict:
             "default_for": list(prof.default_for),
             "owns_remotes": list(prof.owns_remotes),
             "git_email": prof.git_email,
-            "git_name": prof.git_name,
         }
     return {
         "$schema_version": cfg.schema_version,
@@ -212,6 +208,17 @@ def _glob_list_from_raw(
     return list(value)
 
 
+def _service_from_dict(cls, data: dict):
+    """Build a service dataclass, dropping keys it no longer declares.
+
+    A config written by an older mien can carry fields that have since been
+    retired; those are dead weight, not an error, so loading ignores them
+    instead of failing with an unexpected-keyword TypeError.
+    """
+    known = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in data.items() if k in known})
+
+
 def _config_from_dict(raw: dict) -> Config:
     sb_raw = dict(raw.get("secrets_backend", {}))
     sb_type = sb_raw.pop("type")
@@ -225,13 +232,13 @@ def _config_from_dict(raw: dict) -> Config:
 
     profiles: dict[str, Profile] = {}
     for name, p in (raw.get("profiles") or {}).items():
-        google = GoogleService(**p["google"]) if p.get("google") else None
-        github = GitHubService(**p["github"]) if p.get("github") else None
-        slack = [SlackWorkspace(**w) for w in (p.get("slack") or [])]
-        aws = AWSService(**p["aws"]) if p.get("aws") else None
-        oci = OCIService(**p["oci"]) if p.get("oci") else None
-        atlassian = AtlassianService(**p["atlassian"]) if p.get("atlassian") else None
-        notion = NotionService(**p["notion"]) if p.get("notion") else None
+        google = _service_from_dict(GoogleService, p["google"]) if p.get("google") else None
+        github = _service_from_dict(GitHubService, p["github"]) if p.get("github") else None
+        slack = [_service_from_dict(SlackWorkspace, w) for w in (p.get("slack") or [])]
+        aws = _service_from_dict(AWSService, p["aws"]) if p.get("aws") else None
+        oci = _service_from_dict(OCIService, p["oci"]) if p.get("oci") else None
+        atlassian = _service_from_dict(AtlassianService, p["atlassian"]) if p.get("atlassian") else None
+        notion = _service_from_dict(NotionService, p["notion"]) if p.get("notion") else None
         project_env = [
             ProjectEnvScope(match=s["match"], env=dict(s.get("env") or {}))
             for s in (p.get("project_env") or [])
@@ -251,7 +258,6 @@ def _config_from_dict(raw: dict) -> Config:
             owns_remotes=_glob_list_from_raw(
                 name, "owns_remotes", "remote", p.get("owns_remotes"), "github.com/acme/*"),
             git_email=p.get("git_email"),
-            git_name=p.get("git_name"),
         )
 
     return Config(

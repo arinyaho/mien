@@ -56,10 +56,9 @@ def test_save_then_load_roundtrip(monkeypatch, tmp_path):
                     adc_ref=None,
                     gcloud_config_name="personal",
                     default_project=None,
-                    gcloud_login_required=False,
                 ),
                 github=GitHubService(username="me", host="github.com", token_ref="mien-personal-github-token"),
-                slack=[SlackWorkspace(workspace="team-a", team_id=None, user_token_ref="mien-personal-slack-team-a-token")],
+                slack=[SlackWorkspace(workspace="team-a", user_token_ref="mien-personal-slack-team-a-token")],
             )
         },
     )
@@ -102,16 +101,42 @@ def test_git_identity_fields_survive_a_roundtrip(monkeypatch, tmp_path):
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
         bootstrap={}, secret_naming=SecretNaming(default="x", slack_token="y"),
-        profiles={"work": Profile(name="work", git_email="me@x.example",
-                                  git_name="Me")},
+        profiles={"work": Profile(name="work", git_email="me@x.example")},
     )
     save_config(cfg)
     loaded = load_config()
     assert loaded == cfg
     assert loaded.profiles["work"].git_email == "me@x.example"
-    assert loaded.profiles["work"].git_name == "Me"
     # Absent by default.
     assert Profile(name="p").git_email is None
+
+
+def test_retired_fields_in_an_older_config_are_ignored():
+    raw = {
+        "$schema_version": 1,
+        "secrets_backend": {"type": "macos_keychain"},
+        "bootstrap": {},
+        "secret_naming": {},
+        "profiles": {
+            "work": {
+                "google": {
+                    "email": "me@x.example",
+                    "oauth_client_id": "cid",
+                    "oauth_client_secret_ref": None,
+                    "refresh_token_ref": "r",
+                    "adc_ref": None,
+                    "gcloud_config_name": "work",
+                    "default_project": None,
+                    "gcloud_login_required": False,
+                },
+                "slack": [{"workspace": "team-a", "team_id": None, "user_token_ref": "r"}],
+                "git_name": "Me",
+            }
+        },
+    }
+    prof = deserialize_config(raw).profiles["work"]
+    assert prof.google.email == "me@x.example"
+    assert prof.slack == [SlackWorkspace(workspace="team-a", user_token_ref="r")]
 
 
 def test_save_creates_parent_dir_and_chmods_600(monkeypatch, tmp_path):

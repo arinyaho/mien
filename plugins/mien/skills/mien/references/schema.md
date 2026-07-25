@@ -17,7 +17,6 @@ Top level:
 ## Backends
 
 - `gcp_secret_manager`: `{"type": "gcp_secret_manager", "project": "<gcp-project>"}`
-- `oci_vault`: `{"type": "oci_vault", "vault_ocid": "...", "compartment_ocid": "...", "region": "..."}`
 - `macos_keychain`: `{"type": "macos_keychain", "service_prefix": "mien-"}`
 - `keyring`: `{"type": "keyring", "service_prefix": "mien-"}` — Linux Secret Service / Windows Credential Locker; free, no cloud; requires a desktop session (does NOT work headless)
 
@@ -34,8 +33,7 @@ All three are optional per profile.
   "refresh_token_ref":       "<backend-ref>",
   "adc_ref":                 "<backend-ref>|null",
   "gcloud_config_name":      "<typically equals profile name>",
-  "default_project":         "..."|null,
-  "gcloud_login_required":   false
+  "default_project":         "..."|null
 }
 ```
 
@@ -46,7 +44,7 @@ All three are optional per profile.
 
 ### `slack` (array)
 ```jsonc
-[{ "workspace": "team-a", "team_id": null, "user_token_ref": "<backend-ref>" }]
+[{ "workspace": "team-a", "user_token_ref": "<backend-ref>" }]
 ```
 
 ### `notion`
@@ -150,6 +148,6 @@ existing working config is not broken by the check.
 
 `mien-config-manifest` is reserved: `mien` stores a non-secret snapshot of
 `config.json` (refs and identifiers only — no secret values) under this name in
-cloud backends (`gcp_secret_manager`, `oci_vault`). It is pushed automatically
+cloud backends (`gcp_secret_manager`). It is pushed automatically
 after every `mien login` / `mien logout`. Do not create a profile whose rendered
 secret name collides with it.

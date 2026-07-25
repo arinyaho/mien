@@ -245,12 +245,12 @@ def test_statusline_flags_a_wrong_git_author(tmp_path, monkeypatch):
                             email="me@acme.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="work",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
         "personal": Profile(name="personal", google=GoogleService(
                             email="me@personal.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="personal",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
     })
     result = _run("/flat/api", monkeypatch,
                   remote="https://github.com/acme-core/api.git",
@@ -268,7 +268,7 @@ def test_statusline_is_calm_when_the_git_author_matches(tmp_path, monkeypatch):
                             email="me@acme.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="work",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
     })
     result = _run("/flat/api", monkeypatch,
                   remote="https://github.com/acme-core/api.git",
@@ -357,12 +357,12 @@ def test_guard_blocks_a_wrong_commit_author_with_nothing_active(tmp_path, monkey
                             email="me@acme.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="work",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
         "personal": Profile(name="personal", google=GoogleService(
                             email="me@personal.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="personal",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
     })
     result = _run_guard("/flat/api", monkeypatch,
                         remote="https://github.com/acme-core/api.git",

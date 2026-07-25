@@ -19,10 +19,9 @@ Ask the user (one question, multiple choice):
 > Where should `mien` keep your secrets?
 > 1. **macOS Keychain** — zero setup, machine-local
 > 2. **GCP Secret Manager** — encrypted at rest, syncs across machines, requires a GCP project you own
-> 3. **OCI Vault** — same idea, on Oracle Cloud
-> 4. **keyring** — Linux Secret Service (GNOME Keyring / KWallet) or Windows Credential Locker; free, no cloud, no macOS, requires a desktop session (does NOT work headless)
+> 3. **keyring** — Linux Secret Service (GNOME Keyring / KWallet) or Windows Credential Locker; free, no cloud, no macOS, requires a desktop session (does NOT work headless)
 
-Recommend (1) if the user has no preference and is on macOS. Recommend (4) for Linux or Windows users who want local storage with no cloud dependency. (2) is best for users who already use GCP and want cross-device sync.
+Recommend (1) if the user has no preference and is on macOS. Recommend (3) for Linux or Windows users who want local storage with no cloud dependency. (2) is best for users who already use GCP and want cross-device sync.
 
 ## Step 2 — Backend prerequisites
 
@@ -59,20 +58,6 @@ mien doctor
 ```
 
 If `ADC quota project` is missing, fix it: `gcloud auth application-default set-quota-project <id>`.
-
-### OCI Vault
-
-```bash
-mien preflight --backend oci_vault --json
-```
-
-If `~/.oci/config` is missing, hand off — OCI setup involves API key generation in their console. Direct the user to run `oci setup config` or the bootstrap doc, then come back.
-
-Once ready:
-
-```bash
-mien init --backend oci_vault --vault-ocid <ocid> --compartment-ocid <ocid> --region <region>
-```
 
 ## Step 3 — Add a profile
 

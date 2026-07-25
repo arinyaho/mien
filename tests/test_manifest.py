@@ -46,8 +46,8 @@ def _cfg(type_="gcp_secret_manager") -> Config:
 
 def test_is_cloud_backend():
     assert is_cloud_backend(BackendConfig(type="gcp_secret_manager", options={}))
-    assert is_cloud_backend(BackendConfig(type="oci_vault", options={}))
     assert not is_cloud_backend(BackendConfig(type="macos_keychain", options={}))
+    assert not is_cloud_backend(BackendConfig(type="keyring", options={}))
 
 
 def test_push_then_pull_roundtrips():

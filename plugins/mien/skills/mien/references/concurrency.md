@@ -37,7 +37,7 @@ Each variable is exported only into the shell that ran `mien use` / `mien exec` 
 | `$TMPDIR/mien/env-<hex>.sh` | **per-invocation** — the loader `mien use` writes; sourced, then removed by the same one-liner |
 | `$TMPDIR/mien/` (the directory) | **shared** — every shell's ephemeral files land here; `mien doctor --gc` sweeps files whose owning pid is dead, across all shells |
 | `$MIEN_CONFIG` (default `~/.config/mien/config.json`) | **shared** — the profile map every shell reads |
-| secrets backend (macOS Keychain / GCP Secret Manager / OCI Vault / keyring) | **shared** — where the tokens actually live |
+| secrets backend (macOS Keychain / GCP Secret Manager / keyring) | **shared** — where the tokens actually live |
 | `~/.config/gcloud/`, `~/.aws/`, `~/.oci/config` | **shared** — the provider stores mien selects into but never isolates |
 | `~/.zshenv` | **shared, persistent** — only touched if you run `mien env sync` |
 

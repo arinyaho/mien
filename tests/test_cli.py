@@ -40,7 +40,7 @@ def test_status_active(runner, mien_cfg, monkeypatch):
 
 
 def test_init_writes_keychain_skeleton(runner, mien_cfg):
-    result = runner.invoke(main, ["init"], input="3\nmien-\n")
+    result = runner.invoke(main, ["init"], input="2\nmien-\n")
     assert result.exit_code == 0, result.output
     payload = json.loads(mien_cfg.read_text())
     assert payload["secrets_backend"]["type"] == "macos_keychain"
@@ -48,14 +48,14 @@ def test_init_writes_keychain_skeleton(runner, mien_cfg):
 
 
 def test_list_after_init(runner, mien_cfg):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(main, ["list"])
     assert result.exit_code == 0
     assert "no profiles" in result.output.lower()
 
 
 def test_whoami_unknown_profile(runner, mien_cfg):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(main, ["whoami", "nope"])
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
@@ -75,9 +75,9 @@ def _rich_profile_cfg(tmp_path, monkeypatch):
             google=GoogleService(email="me@acme.example", oauth_client_id="c",
                                  oauth_client_secret_ref=None, refresh_token_ref=None,
                                  adc_ref=None, gcloud_config_name="work",
-                                 default_project=None, gcloud_login_required=True),
+                                 default_project=None),
             github=GitHubService(username="octocat", host="github.com", token_ref="r"),
-            slack=[SlackWorkspace(workspace="team-a", team_id=None, user_token_ref="r")],
+            slack=[SlackWorkspace(workspace="team-a", user_token_ref="r")],
             aws=AWSService(profile="acme", region="us-west-1",
                            access_key_id_ref=None, secret_access_key_ref=None),
             atlassian=AtlassianService(email="me@acme.example", api_token_ref="r",
@@ -218,7 +218,7 @@ def test_changing_the_declaration_reblocks_until_reapproved(tmp_path, monkeypatc
 
 def _github_profile(runner, mien_cfg, mocker, username="octocat"):
     mocker.patch("mien.cli.load_backend").return_value.put.return_value = "ref://gh"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(main, ["login", "personal", "--service", "github"],
                   input=f"y\n{username}\nghp_x\nn\n")
 
@@ -288,7 +288,7 @@ def test_whoami_live_cleans_ephemeral_credential_files(runner, tmp_path, monkeyp
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="octocat", host="github.com", token_ref="ref://gh"),
-            slack=[SlackWorkspace(workspace="team-a", team_id=None, user_token_ref="ref://slack")],
+            slack=[SlackWorkspace(workspace="team-a", user_token_ref="ref://slack")],
         )},
     ))
     mocker.patch("mien.cli.load_backend").return_value.get.return_value = b"xoxp-secret"
@@ -320,7 +320,7 @@ def test_whoami_live_names_google_when_it_cannot_be_probed(runner, mien_cfg, moc
                 email="me@example.com", oauth_client_id="cid",
                 oauth_client_secret_ref=None, refresh_token_ref="",
                 adc_ref=None, gcloud_config_name="personal",
-                default_project=None, gcloud_login_required=True,
+                default_project=None,
             ),
         )},
     ))
@@ -346,7 +346,7 @@ def test_whoami_live_names_unchecked_services(runner, mien_cfg, mocker):
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="octocat", host="github.com", token_ref="ref://gh"),
-            slack=[SlackWorkspace(workspace="team-a", team_id=None, user_token_ref="ref://s")],
+            slack=[SlackWorkspace(workspace="team-a", user_token_ref="ref://s")],
             notion=NotionService(api_token_ref="ref://n"),
         )},
     ))
@@ -375,7 +375,7 @@ def test_whoami_live_unreachable_does_not_fail(runner, mien_cfg, mocker):
 
 def test_login_github_stores_token_and_updates_config(runner, mien_cfg, mocker):
     mocker.patch("mien.cli.load_backend").return_value.put.return_value = "ref://gh-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         ["login", "personal", "--service", "github"],
@@ -390,7 +390,7 @@ def test_login_github_stores_token_and_updates_config(runner, mien_cfg, mocker):
 
 
 def test_login_slack_requires_workspace(runner, mien_cfg):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         ["login", "personal", "--service", "slack"],
@@ -405,7 +405,7 @@ def test_login_slack_appends_workspace(runner, mien_cfg, mocker):
         "ref://slack-a",
         "ref://slack-b",
     ]
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(main, ["login", "personal", "--service", "slack", "--workspace", "team-a"], input="y\nxoxp-aaa\n")
     runner.invoke(main, ["login", "personal", "--service", "slack", "--workspace", "team-b"], input="xoxp-bbb\n")
     payload = json.loads(mien_cfg.read_text())
@@ -421,7 +421,7 @@ def test_login_google_runs_oauth_and_stores(runner, mien_cfg, mocker):
         "ref://oauth-secret",
         "ref://refresh",
     ]
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         [
@@ -443,7 +443,7 @@ def test_login_google_runs_oauth_and_stores(runner, mien_cfg, mocker):
 
 def test_use_routes_secrets_through_ephemeral_file(runner, mien_cfg, mocker, tmp_path, monkeypatch):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://gh"
     runner.invoke(main, ["login", "personal", "--service", "github"], input="y\nme\nghp_xxx\nn\n")
@@ -473,7 +473,7 @@ def _use_setup(runner, mocker, tmp_path, monkeypatch, *, slack=True):
                              SlackWorkspace, GitHubService, save_config)
     monkeypatch.setenv("MIEN_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    ws = [SlackWorkspace(workspace="team-a", team_id=None, user_token_ref="ref://s")] if slack else []
+    ws = [SlackWorkspace(workspace="team-a", user_token_ref="ref://s")] if slack else []
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
@@ -519,7 +519,7 @@ def test_use_leaves_the_files_on_disk_for_the_shell_to_source(runner, tmp_path, 
 
 
 def test_use_refuses_when_stdout_is_a_tty(runner, mien_cfg, mocker, monkeypatch):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://gh"
     runner.invoke(main, ["login", "personal", "--service", "github"], input="y\nme\nghp_xxx\nn\n")
@@ -537,7 +537,7 @@ def test_use_refuses_when_stdout_is_a_tty(runner, mien_cfg, mocker, monkeypatch)
 
 def test_use_print_flag_overrides_tty_guard(runner, mien_cfg, mocker, tmp_path, monkeypatch):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://gh"
     runner.invoke(main, ["login", "personal", "--service", "github"], input="y\nme\nghp_xxx\nn\n")
@@ -554,7 +554,7 @@ def test_exec_removes_ephemeral_files_after_child_exits(
     runner, mien_cfg, mocker, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://slack"
     # A slack workspace guarantees build_env writes an ephemeral token file,
@@ -591,7 +591,7 @@ def test_exec_removes_ephemeral_files_when_child_fails(
     runner, mien_cfg, mocker, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://slack"
     runner.invoke(
@@ -615,13 +615,13 @@ def test_exec_removes_ephemeral_files_when_child_fails(
 
 
 def test_unset_emits_unsets(runner, mien_cfg):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(main, ["unset"])
     assert "unset MIEN_PROFILE" in result.output
 
 
 def test_token_google_prints_access_token(runner, mien_cfg, mocker):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.side_effect = ["ref://oauth", "ref://refresh"]
     backend.get.side_effect = lambda r: {
@@ -654,7 +654,7 @@ def test_token_google_accepts_explicit_profile_without_env(runner, mien_cfg, moc
     # exported MIEN_PROFILE on the developer's machine would otherwise mask
     # whether --profile did any work at all.
     monkeypatch.delenv("MIEN_PROFILE", raising=False)
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.side_effect = ["ref://oauth", "ref://refresh"]
     backend.get.side_effect = lambda r: {
@@ -687,7 +687,7 @@ def test_token_google_explicit_profile_beats_env(runner, mien_cfg, mocker):
     pinned here to a profile that does not exist, so if --profile were ignored the
     command would fail with "not found" instead of minting the token.
     """
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.side_effect = ["ref://oauth", "ref://refresh"]
     backend.get.side_effect = lambda r: {
@@ -717,7 +717,7 @@ def test_token_google_explicit_profile_beats_env(runner, mien_cfg, mocker):
 def test_token_without_profile_or_env_names_both_remedies(runner, mien_cfg, mocker, monkeypatch):
     """The error must name both remedies: the --profile flag and the eval pattern."""
     monkeypatch.delenv("MIEN_PROFILE", raising=False)
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(main, ["token", "google"], env={"MIEN_CONFIG": str(mien_cfg)})
     assert result.exit_code != 0
     assert "--profile" in result.output
@@ -767,7 +767,7 @@ def test_init_yes_overwrites_existing(runner, mien_cfg, mocker):
 def test_login_github_token_stdin(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://gh"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         ["login", "personal", "--service", "github", "--username", "me", "--token-stdin"],
@@ -780,7 +780,7 @@ def test_login_github_token_stdin(runner, mien_cfg, mocker):
 
 def test_login_github_ssh_key_path_skips_pat_prompt(runner, mien_cfg, mocker, tmp_path):
     mocker.patch("mien.cli.load_backend")
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     keyfile = tmp_path / "id_test"
     keyfile.write_text("PRIVATE")
     result = runner.invoke(
@@ -799,7 +799,7 @@ def test_login_github_ssh_key_path_skips_pat_prompt(runner, mien_cfg, mocker, tm
 def test_login_github_ssh_key_stored_in_backend(runner, mien_cfg, mocker, tmp_path):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://ssh"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     keyfile = tmp_path / "id_test"
     keyfile.write_bytes(b"PRIVATE-KEY")
     result = runner.invoke(
@@ -822,7 +822,7 @@ def test_login_github_interactive_ssh_prompt_path(runner, mien_cfg, mocker, tmp_
     backend.put.return_value = "ref://gh"
     keyfile = tmp_path / "id_test"
     keyfile.write_text("PRIVATE")
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         ["login", "personal", "--service", "github"],
@@ -839,7 +839,7 @@ def test_login_github_interactive_ssh_prompt_path(runner, mien_cfg, mocker, tmp_
 def test_login_github_pat_and_ssh_compose_across_calls(runner, mien_cfg, mocker, tmp_path):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://gh"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(main, ["login", "work2", "--service", "github"], input="y\nme\ntok\nn\n")
     keyfile = tmp_path / "id_test"
     keyfile.write_text("PRIVATE")
@@ -895,7 +895,7 @@ def test_preflight_gcp_reports_missing_pieces(runner, mien_cfg, mocker):
 def test_logout_removes_service(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://gh"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(main, ["login", "personal", "--service", "github"], input="y\nme\ntok\nn\n")
     result = runner.invoke(main, ["logout", "personal", "--service", "github"])
     assert result.exit_code == 0
@@ -905,7 +905,7 @@ def test_logout_removes_service(runner, mien_cfg, mocker):
 
 
 def test_doctor_runs_health_check(runner, mien_cfg, mocker):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
@@ -914,7 +914,7 @@ def test_doctor_runs_health_check(runner, mien_cfg, mocker):
 
 
 def test_doctor_reports_failure(runner, mien_cfg, mocker):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.side_effect = RuntimeError("boom")
     result = runner.invoke(main, ["doctor"])
@@ -923,7 +923,7 @@ def test_doctor_reports_failure(runner, mien_cfg, mocker):
 
 
 def test_doctor_gc_sweeps(runner, mien_cfg, mocker):
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     mocker.patch("mien.cli.load_backend").return_value
     gc = mocker.patch("mien.cli.EphemeralStore.gc")
     runner.invoke(main, ["doctor", "--gc"])
@@ -974,7 +974,7 @@ def test_init_aborts_on_health_check_failure_with_actionable_message(runner, mie
 def test_init_keychain_runs_health_check(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.return_value = None
-    result = runner.invoke(main, ["init"], input="3\nmien-\n")
+    result = runner.invoke(main, ["init"], input="2\nmien-\n")
     assert result.exit_code == 0
     backend.health_check.assert_called_once()
     assert "OK" in result.output
@@ -1083,7 +1083,7 @@ def test_login_keychain_does_not_push_manifest(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://gh-token"
     push = mocker.patch("mien.cli.push_manifest")
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         ["login", "personal", "--service", "github"],
@@ -1113,7 +1113,7 @@ def test_logout_pushes_manifest(runner, mien_cfg, mocker):
 
 def test_login_rejects_reserved_manifest_profile_name(runner, mien_cfg, mocker):
     mocker.patch("mien.cli.load_backend")
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         ["login", "mien-config-manifest", "--service", "github", "--username", "u"],
@@ -1174,7 +1174,7 @@ def test_init_keychain_never_pulls_manifest(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.return_value = None
     pull = mocker.patch("mien.cli.pull_manifest")
-    result = runner.invoke(main, ["init"], input="3\nmien-\n")
+    result = runner.invoke(main, ["init"], input="2\nmien-\n")
     assert result.exit_code == 0, result.output
     pull.assert_not_called()
 
@@ -1249,7 +1249,7 @@ def test_sync_no_manifest_errors(runner, mien_cfg, mocker):
 def test_sync_requires_cloud_backend(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.return_value = None
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(main, ["sync"])
     assert result.exit_code != 0
     assert "cloud backend" in result.output.lower()
@@ -1310,7 +1310,7 @@ def test_push_command_pushes_manifest(runner, mien_cfg, mocker):
 def test_push_command_noop_on_keychain(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.return_value = None
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     push = mocker.patch("mien.cli.push_manifest")
     result = runner.invoke(main, ["push"])
     assert result.exit_code == 0, result.output
@@ -1337,7 +1337,7 @@ def test_init_yes_auto_imports_manifest_without_prompt(runner, mien_cfg, mocker)
 def test_login_atlassian_stores_token_and_updates_config(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://atl-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         [
@@ -1360,7 +1360,7 @@ def test_login_atlassian_stores_token_and_updates_config(runner, mien_cfg, mocke
 def test_list_shows_atlassian(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://atl-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         [
@@ -1379,7 +1379,7 @@ def test_list_shows_atlassian(runner, mien_cfg, mocker):
 def test_logout_atlassian_removes_service(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://atl-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         [
@@ -1401,7 +1401,7 @@ def test_token_atlassian_prints_api_token(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://atl-token"
     backend.get.return_value = b"my-secret-api-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         [
@@ -1423,7 +1423,7 @@ def test_token_atlassian_prints_api_token(runner, mien_cfg, mocker):
 def test_login_notion_stores_token_and_updates_config(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://notion-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     result = runner.invoke(
         main,
         ["login", "personal", "--service", "notion", "--token-stdin"],
@@ -1438,7 +1438,7 @@ def test_login_notion_stores_token_and_updates_config(runner, mien_cfg, mocker):
 def test_list_shows_notion(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://notion-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         ["login", "personal", "--service", "notion", "--token-stdin"],
@@ -1452,7 +1452,7 @@ def test_list_shows_notion(runner, mien_cfg, mocker):
 def test_logout_notion_removes_service(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://notion-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         ["login", "personal", "--service", "notion", "--token-stdin"],
@@ -1469,7 +1469,7 @@ def test_token_notion_prints_api_token(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://notion-token"
     backend.get.return_value = b"my-secret-notion-token"
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         ["login", "personal", "--service", "notion", "--token-stdin"],
@@ -1488,7 +1488,7 @@ def _notion_profile(runner, mocker, secret=b"my-secret-notion-token"):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://notion-token"
     backend.get.return_value = secret
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         ["login", "personal", "--service", "notion", "--token-stdin"],
@@ -1522,7 +1522,7 @@ def _atlassian_profile(runner, mocker, secret=b"my-secret-api-token"):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://atl-token"
     backend.get.return_value = secret
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         [
@@ -1565,7 +1565,7 @@ def test_token_refusal_does_not_offer_google_adc_path_as_a_bearer_token(
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.side_effect = ["ref://oauth", "ref://refresh"]
     mocker.patch("mien.cli.google_installed_app_flow", return_value="refresh-zzz")
-    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
     runner.invoke(
         main,
         ["login", "personal", "--service", "google",
@@ -1977,8 +1977,7 @@ def test_run_removes_ephemeral_files_after_child_exits(runner, tmp_path, monkeyp
         profiles={"work": Profile(
             name="work",
             default_for=["*/Projects/acme"],
-            slack=[SlackWorkspace(workspace="team-a", team_id=None,
-                                  user_token_ref="ref://slack")],
+            slack=[SlackWorkspace(workspace="team-a", user_token_ref="ref://slack")],
         )},
     ))
     mocker.patch("mien.cli.load_backend").return_value.get.return_value = b"xoxp-secret"

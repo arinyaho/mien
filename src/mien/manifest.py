@@ -4,7 +4,7 @@ from mien.backends.base import SecretsBackend
 from mien.config import BackendConfig, Config, deserialize_config, serialize_config
 
 MANIFEST_SECRET_NAME = "mien-config-manifest"
-_CLOUD_BACKENDS = {"gcp_secret_manager", "oci_vault"}
+_CLOUD_BACKENDS = {"gcp_secret_manager"}
 
 
 def is_cloud_backend(backend_cfg: BackendConfig) -> bool:
@@ -28,6 +28,6 @@ def pull_manifest(backend: SecretsBackend) -> Config | None:
     if not refs:
         return None
     exact = [r for r in refs if _ref_secret_name(r) == MANIFEST_SECRET_NAME]
-    chosen = exact or refs  # OCI OCID refs aren't name-derivable -> keep prefix list
+    chosen = exact or refs  # refs a backend doesn't derive from the name -> keep prefix list
     data = backend.get(chosen[0])
     return deserialize_config(data.decode("utf-8"))

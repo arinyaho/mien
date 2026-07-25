@@ -229,21 +229,14 @@ def _verify_backend(backend, backend_type: str, bootstrap: dict) -> None:
                 f"      --member=user:{account} --role=roles/secretmanager.admin"
             )
             msg.append("Then: mien doctor")
-        elif backend_type == "oci_vault":
-            msg.append("")
-            msg.append("Check ~/.oci/config and that the API key PEM exists.")
-            msg.append("Then: mien doctor")
         raise click.ClickException("\n".join(msg))
 
 
 @main.command("init")
-@click.option("--backend", type=click.Choice(["gcp_secret_manager", "oci_vault", "macos_keychain", "keyring"]),
+@click.option("--backend", type=click.Choice(["gcp_secret_manager", "macos_keychain", "keyring"]),
               help="Skip the backend picker.")
 @click.option("--project", help="(gcp) project ID")
 @click.option("--bootstrap-email", help="(gcp) bootstrap account email")
-@click.option("--vault-ocid", help="(oci) vault OCID")
-@click.option("--compartment-ocid", help="(oci) compartment OCID")
-@click.option("--region", default=None, help="(oci) region (default: ap-chuncheon-1)")
 @click.option("--service-prefix", default=None, help="(keychain) service prefix (default: 'mien-')")
 @click.option("--yes", "-y", is_flag=True, help="Overwrite existing config and auto-import an existing backend manifest without prompting.")
 @click.option("--no-import", "no_import", is_flag=True,
@@ -252,9 +245,6 @@ def init_cmd(
     backend: str | None,
     project: str | None,
     bootstrap_email: str | None,
-    vault_ocid: str | None,
-    compartment_ocid: str | None,
-    region: str | None,
     service_prefix: str | None,
     yes: bool,
     no_import: bool,
@@ -269,11 +259,10 @@ def init_cmd(
     if backend is None:
         click.echo("Pick a secrets backend:")
         click.echo("  1) gcp_secret_manager")
-        click.echo("  2) oci_vault")
-        click.echo("  3) macos_keychain")
-        click.echo("  4) keyring (Linux Secret Service / Windows Credential Locker)")
-        choice = click.prompt("Choice", type=click.Choice(["1", "2", "3", "4"]))
-        backend = {"1": "gcp_secret_manager", "2": "oci_vault", "3": "macos_keychain", "4": "keyring"}[choice]
+        click.echo("  2) macos_keychain")
+        click.echo("  3) keyring (Linux Secret Service / Windows Credential Locker)")
+        choice = click.prompt("Choice", type=click.Choice(["1", "2", "3"]))
+        backend = {"1": "gcp_secret_manager", "2": "macos_keychain", "3": "keyring"}[choice]
 
     if backend == "gcp_secret_manager":
         if not project:
@@ -285,18 +274,6 @@ def init_cmd(
         bootstrap_email = _clean_email(bootstrap_email)
         backend_cfg = BackendConfig(type="gcp_secret_manager", options={"project": project})
         bootstrap = {"gcp_account": bootstrap_email}
-    elif backend == "oci_vault":
-        if not vault_ocid:
-            vault_ocid = click.prompt("Vault OCID").strip()
-        if not compartment_ocid:
-            compartment_ocid = click.prompt("Compartment OCID").strip()
-        if region is None:
-            region = click.prompt("Region", default="ap-chuncheon-1")
-        backend_cfg = BackendConfig(
-            type="oci_vault",
-            options={"vault_ocid": vault_ocid.strip(), "compartment_ocid": compartment_ocid.strip(), "region": region},
-        )
-        bootstrap = {}
     elif backend == "keyring":
         if service_prefix is None:
             service_prefix = click.prompt("Service prefix", default="mien-")
@@ -821,7 +798,7 @@ def login_cmd(
         ref = backend.put(ref_name, token.encode("utf-8"))
         prof = cfg.profiles.get(profile_name) or Profile(name=profile_name)
         prof.slack = [w for w in prof.slack if w.workspace != workspace]
-        prof.slack.append(SlackWorkspace(workspace=workspace, team_id=None, user_token_ref=ref))
+        prof.slack.append(SlackWorkspace(workspace=workspace, user_token_ref=ref))
         cfg.profiles[profile_name] = prof
         _save_and_sync(cfg, backend)
         click.echo(f"stored slack token for {profile_name}/{workspace} at {ref}")
@@ -862,7 +839,6 @@ def login_cmd(
             adc_ref=None,
             gcloud_config_name=profile_name,
             default_project=None,
-            gcloud_login_required=False,
         )
         cfg.profiles[profile_name] = prof
         _save_and_sync(cfg, backend)
@@ -1021,9 +997,7 @@ def sync_cmd(dry_run: bool, yes: bool) -> None:
     """Pull the config manifest from the backend and reconcile local config."""
     cfg = _require_config()
     if not is_cloud_backend(cfg.secrets_backend):
-        raise click.ClickException(
-            "sync requires a cloud backend (gcp_secret_manager / oci_vault)"
-        )
+        raise click.ClickException("sync requires a cloud backend (gcp_secret_manager)")
     backend = load_backend(cfg.secrets_backend)
     remote = pull_manifest(backend)
     if remote is None:
@@ -1784,7 +1758,7 @@ def doctor_cmd(gc: bool) -> None:
 
 
 @main.command("preflight")
-@click.option("--backend", type=click.Choice(["gcp_secret_manager", "oci_vault", "macos_keychain"]),
+@click.option("--backend", type=click.Choice(["gcp_secret_manager", "macos_keychain"]),
               default="gcp_secret_manager", help="Backend to check prerequisites for.")
 @click.option("--project", help="(gcp) project to verify access on")
 @click.option("--account", help="(gcp) account email to verify")
@@ -1841,11 +1815,6 @@ def preflight_cmd(backend: str, project: str | None, account: str | None, as_jso
         else:
             add("ADC present", False, "no application_default_credentials.json",
                 f"gcloud auth application-default login --account={account or '<email>'}")
-
-    elif backend == "oci_vault":
-        oci_cfg = Path.home() / ".oci" / "config"
-        add("~/.oci/config", oci_cfg.exists(), "",
-            "Create an API key in OCI Console and run `oci setup config`")
 
     elif backend == "macos_keychain":
         # The backend talks to the Keychain in-process, not via the security CLI,

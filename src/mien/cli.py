@@ -16,7 +16,7 @@ from mien.ambient import (
     unexpandable_scope_vars,
     write_ambient,
 )
-from mien.backends import load_backend
+from mien.backends import UnknownBackendType, ensure_known_backend, load_backend
 from mien.ephemeral import EphemeralStore
 from mien.config import (
     AWSService,
@@ -60,6 +60,12 @@ GOOGLE_DEFAULT_SCOPES = [
 
 def _friendly_backend_message(exc: BaseException) -> str | None:
     """Translate noisy backend exceptions to actionable hints."""
+    if isinstance(exc, UnknownBackendType):
+        # Already written for a human, by the module that knows which backends
+        # exist. Carrying it through here is what turns it into a clean
+        # "Error: ..." instead of a traceback.
+        return str(exc)
+
     try:
         from google.api_core import exceptions as gerr
     except ImportError:
@@ -996,6 +1002,7 @@ def _profile_fingerprint(prof) -> str:
 def sync_cmd(dry_run: bool, yes: bool) -> None:
     """Pull the config manifest from the backend and reconcile local config."""
     cfg = _require_config()
+    ensure_known_backend(cfg.secrets_backend)
     if not is_cloud_backend(cfg.secrets_backend):
         raise click.ClickException("sync requires a cloud backend (gcp_secret_manager)")
     backend = load_backend(cfg.secrets_backend)
@@ -1034,6 +1041,9 @@ def sync_cmd(dry_run: bool, yes: bool) -> None:
 def push_cmd() -> None:
     """Force-push the current local config to the backend manifest."""
     cfg = _require_config()
+    # Before the local/cloud split: a backend type mien no longer knows is not a
+    # local backend, and must not be reported as a successful no-op.
+    ensure_known_backend(cfg.secrets_backend)
     if not is_cloud_backend(cfg.secrets_backend):
         # Intentionally exit 0 (not an error like sync): pushing a manifest to a
         # local-only backend is simply meaningless, not a user mistake.

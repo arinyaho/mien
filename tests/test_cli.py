@@ -1318,6 +1318,50 @@ def test_push_command_noop_on_keychain(runner, mien_cfg, mocker):
     assert "no-op" in result.output.lower()
 
 
+def _config_with_retired_backend() -> None:
+    """A config as an older mien left it: naming a backend that no longer exists."""
+    from mien.config import (BackendConfig, Config, GitHubService, Profile,
+                             SecretNaming, save_config)
+    save_config(Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="oci_vault", options={"vault_id": "v1"}),
+        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        profiles={"work": Profile(
+            name="work",
+            github=GitHubService(username="octocat", host="github.com", token_ref="r"))},
+    ))
+
+
+def test_retired_backend_type_is_actionable_not_a_traceback(runner, mien_cfg):
+    _config_with_retired_backend()
+    result = runner.invoke(main, ["use", "work"])
+    assert result.exit_code != 0
+    # click renders a ClickException itself; anything that escaped the CLI's
+    # error funnel would show up here as the exception object — a traceback.
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    out = result.output
+    assert "oci_vault" in out                             # names the offending type
+    assert "no longer reachable" in out                   # honest about the secrets
+    assert "mien init" in out and "mien login" in out     # states the recovery path
+
+
+def test_push_does_not_claim_success_on_a_retired_backend(runner, mien_cfg, mocker):
+    _config_with_retired_backend()
+    push = mocker.patch("mien.cli.push_manifest")
+    result = runner.invoke(main, ["push"])
+    assert result.exit_code != 0, result.output
+    push.assert_not_called()
+    assert "no-op" not in result.output.lower()  # a retired backend is not "local"
+    assert "oci_vault" in result.output
+
+
+def test_sync_on_a_retired_backend_says_the_backend_was_removed(runner, mien_cfg):
+    _config_with_retired_backend()
+    result = runner.invoke(main, ["sync"])
+    assert result.exit_code != 0
+    assert "oci_vault" in result.output and "removed" in result.output
+
+
 def test_init_yes_auto_imports_manifest_without_prompt(runner, mien_cfg, mocker):
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.health_check.return_value = None

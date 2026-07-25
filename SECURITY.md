@@ -97,7 +97,7 @@ Compromise of the bootstrap credential is equivalent to compromise of every iden
 
 **The manifest.** With a cloud backend, `mien` stores a copy of the configuration as a secret named `mien-config-manifest`, and pushes it after `mien login` and `mien logout`, on a best-effort basis — a failed push is a warning, not an error. `mien init` writes the local config without pushing, and `mien push` is the explicit manual path. It contains references and identifiers only — no secret value — with one exception: values you place in `project_env` are copied verbatim, so a secret typed there is uploaded. Do not put secrets in `project_env`.
 
-Both cloud backends update the manifest in place on each push — a new version of one fixed secret — so the copy a second machine pulls tracks your latest config. (Nothing deletes the manifest; it is only ever rewritten.)
+The cloud backend updates the manifest in place on each push — a new version of one fixed secret — so the copy a second machine pulls tracks your latest config. (Nothing deletes the manifest; it is only ever rewritten.)
 
 Two commands adopt that manifest. `mien init --yes` imports it without prompting, and `mien sync` pulls it and replaces the local config — also without prompting under `--yes`. Its interactive confirmation lists only profile *names*, so a changed `project_env` value shows up as `~ change: work` and nothing more. A backend an attacker controls can therefore redefine every profile — including which directories claim which identity, and including the `project_env` values that become executable code — through either path.
 

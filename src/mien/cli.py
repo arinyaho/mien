@@ -1495,6 +1495,33 @@ def prompt_cmd() -> None:
 
 _GUARD_OFF = {"off", "0", "false", "no"}
 
+# Environment markers set by agent harnesses that record a command's output.
+# Presence means: anything this process writes to stdout may be captured into a
+# transcript that outlives the command — so printing a raw secret there is not a
+# transient exposure but a durable one. The list is a heuristic and deliberately
+# fails *open*: an unrecognized harness is not detected, so this is a backstop
+# for the common case, never a guarantee.
+_CAPTURE_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MIEN_CAPTURED")
+_CAPTURE_OK = {"capture-ok", "allow-capture", "off"}
+
+# What `mien exec` puts in the environment for each service `mien token` prints,
+# so the refusal can name the exact variable to reach for. Google is the odd one:
+# `exec` supplies an ADC *credentials file*, not the bare access token this
+# command mints, so the substitute is a path rather than a token string.
+_EXEC_ENV_FOR = {
+    "notion": "NOTION_TOKEN",
+    "atlassian": "ATLASSIAN_API_TOKEN",
+    "google": "GOOGLE_APPLICATION_CREDENTIALS",
+}
+
+
+def capture_context() -> str | None:
+    """The harness marker suggesting this command's stdout is being recorded."""
+    for marker in _CAPTURE_MARKERS:
+        if os.environ.get(marker, "").strip():
+            return marker
+    return None
+
 
 @main.command("guard")
 @click.option("--force", "-f", is_flag=True, help="Skip the check and exit 0.")
@@ -1580,7 +1607,37 @@ def run_cmd(argv: tuple[str, ...]) -> None:
     help="Profile to mint for. Defaults to $MIEN_PROFILE. Prefer passing this "
     "explicitly from an agent, whose shell state does not survive between calls.",
 )
-def token_cmd(service: str, profile: str | None) -> None:
+@click.option("--force", "-f", is_flag=True,
+              help="Print the secret even where stdout looks recorded.")
+def token_cmd(service: str, profile: str | None, force: bool) -> None:
+    """Print a credential for `service` on stdout — a raw secret.
+
+    Prefer `mien exec <profile> -- <cmd...>`, which hands the credential to the
+    command in its environment instead of writing it anywhere readable. This
+    command exists for the case that genuinely needs the bare string, and it
+    refuses by default where stdout looks recorded (see `--force`).
+    """
+    marker = None if force else capture_context()
+    if marker and os.environ.get("MIEN_TOKEN", "").strip().lower() not in _CAPTURE_OK:
+        var = _EXEC_ENV_FOR[service]
+        substitute = (
+            f"    mien exec <profile> -- <your command>   # arrives as ${var}"
+            if service != "google" else
+            f"    mien exec <profile> -- <your command>   # arrives as ${var}\n"
+            "    (an ADC credentials file — Google client libraries read it "
+            "directly; there is no env form of a bare access token)"
+        )
+        raise click.ClickException(
+            f"refusing to print a raw secret: ${marker} is set, so this looks like "
+            "an agent session where anything on stdout can be captured into a "
+            "transcript that outlives the command.\n"
+            "  Give the credential to the program instead of printing it:\n"
+            f"{substitute}\n"
+            "  For a one-off HTTP call, let the child shell expand it:\n"
+            "    mien exec <profile> -- sh -c 'curl -H \"Authorization: Bearer "
+            f"${var}\" ...'\n"
+            "  Override once: MIEN_TOKEN=capture-ok mien token ... (or --force)."
+        )
     cfg = _require_config()
     name = profile or os.environ.get("MIEN_PROFILE")
     if not name:

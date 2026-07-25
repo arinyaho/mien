@@ -1483,6 +1483,90 @@ def test_token_notion_prints_api_token(runner, mien_cfg, mocker):
     assert "my-secret-notion-token" in result.output
 
 
+def _notion_profile(runner, mocker, secret=b"my-secret-notion-token"):
+    """A configured profile whose notion token is `secret`."""
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://notion-token"
+    backend.get.return_value = secret
+    runner.invoke(main, ["init"], input="3\nmien-\n")
+    runner.invoke(
+        main,
+        ["login", "personal", "--service", "notion", "--token-stdin"],
+        input="y\n" + secret.decode() + "\n",
+    )
+
+
+def test_token_refuses_where_stdout_is_recorded(runner, mien_cfg, mocker):
+    """The accident this guards: a secret printed into an agent transcript.
+
+    Piping `mien token` into a program lets any echo of its input (a traceback, a
+    usage error) capture the secret durably. The refusal points at `mien exec`,
+    which hands the credential over in the environment instead.
+    """
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code != 0
+    assert "my-secret-notion-token" not in result.output  # the point of all this
+    assert "mien exec" in result.output
+    assert "NOTION_TOKEN" in result.output
+    assert "CLAUDECODE" in result.output
+
+
+@pytest.mark.parametrize("override", [
+    {"MIEN_TOKEN": "capture-ok"},
+    {"MIEN_TOKEN": "off"},
+])
+def test_token_capture_refusal_is_overridable(runner, mien_cfg, mocker, override):
+    """Guides rather than traps — the same doctrine as `mien guard`."""
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1", **override},
+    )
+    assert result.exit_code == 0, result.output
+    assert "my-secret-notion-token" in result.output
+
+
+def test_token_capture_refusal_is_overridable_by_force_flag(runner, mien_cfg, mocker):
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion", "--force"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    assert result.exit_code == 0, result.output
+    assert "my-secret-notion-token" in result.output
+
+
+def test_token_prints_normally_outside_a_recorded_context(runner, mien_cfg, mocker):
+    """No harness marker, no refusal: a human at a terminal is unaffected."""
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg)},
+    )
+    assert result.exit_code == 0, result.output
+    assert "my-secret-notion-token" in result.output
+
+
+def test_token_refusal_precedes_touching_the_secrets_backend(runner, mien_cfg, mocker):
+    """Refuse before minting: a blocked call must not spend a credential."""
+    _notion_profile(runner, mocker)
+    backend = mocker.patch("mien.cli.load_backend")
+    backend.reset_mock()
+    runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CLAUDECODE": "1"},
+    )
+    backend.assert_not_called()
+
+
 def _pinned_config(tmp_path, monkeypatch, **scopes):
     """Write a config whose profiles claim directories via default_for."""
     from mien.config import BackendConfig, Config, Profile, SecretNaming, save_config

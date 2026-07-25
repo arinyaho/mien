@@ -59,11 +59,13 @@ $MIEN which                         # profile claimed by the current directory
 $MIEN claim <profile>               # bind THIS workspace to a profile via a local .mien (writes, approves, git-ignores)
 $MIEN allow                         # approve an existing .mien so it can drive identity here
 $MIEN run -- <cmd...>               # run cmd as that profile
-$MIEN token google --profile <p>    # mint a fresh google access token (for curl)
+$MIEN token google --profile <p>    # LAST RESORT: prints a raw secret on stdout; refuses under an agent harness
 $MIEN statusline                    # one-line identity segment for a Claude Code status line
 $MIEN prompt                        # same segment for a shell prompt (zsh RPROMPT / bash PS1)
 $MIEN guard                         # exit non-zero if the identity is confidently wrong for this repo
 ```
+
+**Never pipe a secret into a program — hand it over in the environment.** To give a command a credential, use `mien exec <profile> -- <cmd...>`: the secret arrives as an env var (`NOTION_TOKEN`, `ATLASSIAN_API_TOKEN`, `GH_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS`, …) and is never written anywhere readable. Do **not** do `mien token <svc> | <program>` — `token` prints a raw secret on stdout, and any program that echoes its input (a traceback, a usage error, a debug log) leaks it into the session transcript. `mien token` therefore refuses by default when it detects an agent harness (`$CLAUDECODE` and friends), naming `mien exec` in the error; override with `MIEN_TOKEN=capture-ok` or `--force` only when a bare string is genuinely required. For a one-off HTTP call let the child shell expand it: `mien exec <p> -- sh -c 'curl -H "Authorization: Bearer $NOTION_TOKEN" …'`, which also keeps the secret out of argv.
 
 **Commit author is git's own job.** mien does not set `user.email` — git already does this natively with `includeIf` (`gitdir:` by directory, `hasconfig:remote.*.url:` by repo owner) pointing at a per-identity gitconfig. The scp `git@host:owner/` remote form needs its own `**host:owner/**` rule alongside the `**/*host/owner/**` one that covers https/ssh. To sharpen mien's own warning, add `git_email` to the profile in `~/.config/mien/config.json` (a hand-edited field, same as `owns_remotes`/`default_for`) — mien reads it only for the author cross-check, so `guard` and the status line warn when a commit's `user.email` disagrees with the identity acting here. Prevention is git's includeIf; `guard` is the backstop.
 

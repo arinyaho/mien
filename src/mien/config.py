@@ -5,7 +5,10 @@ import os
 from collections.abc import Iterable
 from dataclasses import MISSING, asdict, dataclass, field
 from dataclasses import fields as dc_fields
+from functools import lru_cache
 from pathlib import Path
+from types import UnionType
+from typing import Union, get_args, get_origin, get_type_hints
 
 SCHEMA_VERSION = 1
 
@@ -27,7 +30,13 @@ class GoogleService:
     email: str
     oauth_client_id: str
     oauth_client_secret_ref: str | None
-    refresh_token_ref: str
+    # Null is a real, working state, not an unset field: a gcloud-login-only
+    # profile has no stored refresh token, every reader guards on it
+    # (`mien env`, `mien whoami`, `mien logout`), and mien's own configs carry
+    # null here. Annotated accordingly — the leaf check reads these annotations,
+    # so `str` would reject a config that loads today. The key is still required
+    # to be *present*: that comes from having no default, not from the type.
+    refresh_token_ref: str | None
     adc_ref: str | None
     gcloud_config_name: str
     default_project: str | None
@@ -198,7 +207,34 @@ def _config_to_dict(cfg: Config) -> dict:
         profiles[name] = {
             "google": asdict(prof.google) if prof.google else None,
             "github": asdict(prof.github) if prof.github else None,
-            "slack": [asdict(w) for w in prof.slack],
+            # `"team_id": None` is written deliberately, and is not a live
+            # field — `SlackWorkspace` has not carried one since it was retired,
+            # and nothing here or anywhere else reads it back (loading drops it,
+            # see `_RETIRED_SERVICE_KEYS`). It is a write-side compatibility shim
+            # for OLDER readers of the same config.
+            #
+            # This same JSON is what `mien push` stores as the shared backend
+            # manifest, and the mien that reads it may be an older one on another
+            # machine. In the mien that still had the field, `team_id` was a
+            # required positional with no default, so `SlackWorkspace(**w)` there
+            # raises `TypeError: missing 1 required positional argument` on a
+            # workspace block that has no `team_id` key at all. `mien sync` on
+            # that machine shows the traceback; `mien init` swallows it into
+            # "(manifest check skipped: ...)", exits 0, and leaves the machine
+            # with the empty config init just wrote — every identity gone, almost
+            # silently. Emitting the null keeps those readers working; they treat
+            # it as the value it always had.
+            #
+            # Drop this line once no mien old enough to require `team_id` can
+            # still read a manifest written here — i.e. every machine sharing a
+            # backend has upgraded past the removal. Nothing in the file itself
+            # will tell you; it is a fact about the fleet.
+            #
+            # The other two fields retired alongside it need no such shim:
+            # `GoogleService.gcloud_login_required` and `Profile.git_name` both
+            # had defaults, so an older mien constructs them fine when the key is
+            # absent.
+            "slack": [{**asdict(w), "team_id": None} for w in prof.slack],
             "aws": asdict(prof.aws) if prof.aws else None,
             "oci": asdict(prof.oci) if prof.oci else None,
             "atlassian": asdict(prof.atlassian) if prof.atlassian else None,
@@ -310,6 +346,110 @@ def _object_list_from_raw(where: str, value: object) -> list[dict]:
             f"{type(value).__name__}: {value!r}"
         )
     return [_mapping_from_raw(f"{where}[{i}]", item) for i, item in enumerate(value)]
+
+
+# The JSON types a leaf config value can be annotated with, and how a message
+# names each one. A field annotated with anything else -- a nested dataclass, a
+# service block -- is not a leaf and is built and validated by its own pass.
+_LEAF_TYPE_NAMES: dict[type, str] = {
+    str: "a string",
+    bool: "a boolean",
+    int: "an integer",
+    float: "a number",
+    list: "a list",
+    dict: "a JSON object",
+}
+
+
+def _leaf_spec(annotation: object) -> tuple[tuple[type, ...], str] | None:
+    """Read one field annotation as (accepted types, how to say them), or None.
+
+    None means "not a leaf": ``GoogleService | None`` names a block that
+    ``_service_from_raw`` already validates, not a value to type-check here.
+    ``str | None`` keeps accepting ``None`` because ``NoneType`` is one of its
+    arguments; a bare ``str`` does not, which is the whole distinction the
+    annotations already record.
+    """
+    origin = get_origin(annotation)
+    args = get_args(annotation) if origin in (Union, UnionType) else (annotation,)
+    types: list[type] = []
+    names: list[str] = []
+    nullable = False
+    for arg in args:
+        if arg is type(None):
+            nullable = True
+            continue
+        base = get_origin(arg) or arg  # dict[str, str] -> dict, list[str] -> list
+        if base not in _LEAF_TYPE_NAMES:
+            return None
+        types.append(base)
+        if _LEAF_TYPE_NAMES[base] not in names:
+            names.append(_LEAF_TYPE_NAMES[base])
+    if not types:
+        return None
+    if nullable:
+        types.append(type(None))
+        names.append("null")
+    return tuple(types), " or ".join(names)
+
+
+@lru_cache(maxsize=None)
+def _leaf_specs(cls: type, scalars_only: bool = False) -> dict[str, tuple[tuple[type, ...], str]]:
+    """The leaf fields of a dataclass and the type each one accepts.
+
+    Derived from the annotations rather than hand-listed, so a field added to a
+    dataclass below is checked from the moment it exists and the check cannot
+    drift from the declaration. ``from __future__ import annotations`` makes
+    every annotation a string, hence ``get_type_hints`` rather than
+    ``f.type``. Cached because the answer is a property of the class.
+
+    ``scalars_only`` drops the ``list``/``dict`` fields, for callers whose
+    container fields each have a dedicated validator with a more useful message
+    (``default_for`` says "a list of directory glob strings", not "a list").
+    """
+    hints = get_type_hints(cls)
+    specs = {}
+    for f in dc_fields(cls):
+        spec = _leaf_spec(hints[f.name])
+        if spec is None:
+            continue
+        if scalars_only and any(t in (list, dict) for t in spec[0]):
+            continue
+        specs[f.name] = spec
+    return specs
+
+
+def _check_leaf_values(
+    label: str, data: dict, cls: type, *, scalars_only: bool = False
+) -> None:
+    """Validate the field VALUES of one config block, not just its shape.
+
+    The shape checks above stop at the block: they establish that ``github`` is
+    an object and ``slack`` a list of objects, and then hand the leaves straight
+    to the dataclass, which takes whatever it is given. ``"git_email": 123`` or
+    ``"username": 42`` therefore parsed clean and died much later, wherever the
+    value was first used as text -- as ``AttributeError``/``TypeError``, which
+    the fail-open surfaces do not recognize as a config failure. The status line
+    rendered blank and ``mien guard`` exited 0 with nothing on either stream: a
+    commit under the wrong identity, waved through in silence. Same rule as
+    everywhere else here, applied one level deeper -- check, never coerce, and
+    fail as ``ConfigError`` so the surfaces can say they have stopped working.
+
+    Only keys that are present are checked; an absent one is the caller's
+    missing-key check or a dataclass default, both of which have their own say.
+    """
+    for name, (types, expected) in _leaf_specs(cls, scalars_only).items():
+        if name not in data:
+            continue
+        value = data[name]
+        # `isinstance(True, int)` is True, so a bool is only accepted where the
+        # annotation actually says bool.
+        if isinstance(value, types) and not (isinstance(value, bool) and bool not in types):
+            continue
+        raise ConfigError(
+            f"{label}: {name!r} must be {expected}, got "
+            f"{type(value).__name__}: {value!r}"
+        )
 
 
 class ConfigError(ValueError):
@@ -534,6 +674,7 @@ def _service_from_dict(cls, data: dict, label: str):
             f"{', '.join(repr(m) for m in missing)}. Valid keys are: "
             f"{', '.join(sorted(f.name for f in fields))}."
         )
+    _check_leaf_values(label, cleaned, cls)
     try:
         return cls(**cleaned)
     except TypeError as exc:
@@ -587,6 +728,11 @@ def _config_from_dict(raw: dict) -> Config:
 
     sn = _optional_mapping_from_raw("secret_naming", raw.get("secret_naming"))
     _reject_unknown_keys("secret_naming", sn, {f.name for f in dc_fields(SecretNaming)})
+    # A template is `.format(...)`ed to decide where a secret lives, so a
+    # non-string one dies as an AttributeError deep inside `mien login`/`token`
+    # rather than here. `null` counts: `sn.get(key, default)` returns the null,
+    # not the built-in template.
+    _check_leaf_values("secret_naming", sn, SecretNaming)
     secret_naming = SecretNaming(
         default=sn.get("default", "mien-{profile}-{service}-{kind}"),
         slack_token=sn.get("slack_token", "mien-{profile}-slack-{workspace}-token"),
@@ -600,6 +746,11 @@ def _config_from_dict(raw: dict) -> Config:
             {f.name for f in dc_fields(Profile)} - {"name"},
             tolerated=_RETIRED_PROFILE_KEYS,
         )
+        # The profile's own scalar leaves, `git_email` today. Its list fields are
+        # skipped here because each already has a validator that says more than
+        # "a list" (`_glob_list_from_raw`, `_object_list_from_raw`); a new scalar
+        # profile field is covered the moment it is declared.
+        _check_leaf_values(f"profile {name!r}", p, Profile, scalars_only=True)
         google = _service_from_raw(GoogleService, name, "google", p)
         github = _service_from_raw(GitHubService, name, "github", p)
         slack = [

@@ -810,3 +810,180 @@ def test_a_retired_profile_key_still_loads():
     }
     prof = deserialize_config(raw).profiles["w"]
     assert prof.owns_remotes == ["github.com/me/*"]
+
+
+@pytest.mark.parametrize("profiles, expect", [
+    # The status line reads git_email to cross-check the commit author; an int
+    # reached `!=` fine and `.split("@")`/format as an AttributeError, into the
+    # bare `except Exception: return` that every fail-open surface wraps itself
+    # in. The line went blank and `mien guard` exited 0 on stdout and stderr
+    # both empty — the wrong-identity commit waved through in total silence.
+    ({"work": {"git_email": 123}},
+     "profile 'work': 'git_email' must be a string or null, got int: 123"),
+    ({"work": {"github": {"username": 42, "host": "github.com"}}},
+     "profile 'work': github: 'username' must be a string, got int: 42"),
+    ({"work": {"github": {"username": "u", "host": "github.com", "token_ref": 7}}},
+     "profile 'work': github: 'token_ref' must be a string or null, got int: 7"),
+    ({"work": {"google": dict(_GOOGLE, email=1)}},
+     "profile 'work': google: 'email' must be a string, got int: 1"),
+    ({"work": {"google": dict(_GOOGLE, default_project=["p"])}},
+     "profile 'work': google: 'default_project' must be a string or null, got list"),
+    # A list entry names its index, like every other message from a slack block.
+    ({"work": {"slack": [{"workspace": "a", "user_token_ref": "r"},
+                         {"workspace": {"name": "b"}, "user_token_ref": "r"}]}},
+     "profile 'work': slack[1]: 'workspace' must be a string, got dict"),
+    ({"work": {"aws": {"profile": 7}}},
+     "profile 'work': aws: 'profile' must be a string or null, got int: 7"),
+    ({"work": {"oci": {"config_file": True}}},
+     "profile 'work': oci: 'config_file' must be a string or null, got bool: True"),
+    ({"work": {"atlassian": {"email": "e", "base_url": 8080, "api_token_ref": "r"}}},
+     "profile 'work': atlassian: 'base_url' must be a string, got int: 8080"),
+    ({"work": {"notion": {"api_token_ref": 0}}},
+     "profile 'work': notion: 'api_token_ref' must be a string, got int: 0"),
+])
+def test_a_wrong_typed_leaf_value_is_a_configerror(profiles, expect):
+    """Shape checking has to reach the leaf, not stop at the block.
+
+    Everything above this checked that `github` is an object and `slack` a list
+    of objects, then handed the field values straight to a dataclass, which takes
+    whatever it is given. A wrong-typed leaf therefore parsed clean and died
+    wherever the value was first used as text — as AttributeError/TypeError,
+    which the fail-open surfaces do not recognize as a config failure and so
+    swallow. Every one of these must arrive as a ConfigError instead, naming the
+    profile, the block, the key, what was expected and what was found.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw(profiles))
+    assert expect in str(exc.value)
+
+
+def test_a_wrong_typed_secret_naming_template_is_a_configerror():
+    """A template is `.format()`ed to decide where a secret lives.
+
+    A non-string one dies as an AttributeError inside `mien login`/`mien token`,
+    far from the config that caused it. `null` counts too: the `.get(key,
+    default)` fallback only fires when the key is absent, so an explicit null
+    reaches SecretNaming rather than the built-in template.
+    """
+    for value, found in ((5, "int"), (None, "NoneType")):
+        raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+               "secret_naming": {"default": value}, "profiles": {}}
+        with pytest.raises(ConfigError) as exc:
+            deserialize_config(raw)
+        assert f"secret_naming: 'default' must be a string, got {found}" in str(exc.value)
+
+
+def test_null_is_still_accepted_wherever_the_annotation_allows_it():
+    """The leaf check must not turn every optional field into a required one.
+
+    `str | None` fields are null in configs mien writes itself — a
+    gcloud-login-only google has no stored refresh token, a github identity
+    authenticated by ssh key alone has no `token_ref` — so rejecting null here
+    would refuse configs that work today.
+    """
+    raw = _raw({"work": {
+        "git_email": None,
+        "google": dict(_GOOGLE, oauth_client_secret_ref=None, refresh_token_ref=None,
+                       adc_ref=None, default_project=None),
+        "github": {"username": "u", "host": "github.com", "token_ref": None,
+                   "ssh_key_path": None, "ssh_key_ref": None},
+        "aws": {"region": None, "profile": None, "access_key_id_ref": None,
+                "secret_access_key_ref": None},
+        "oci": {"profile": None, "config_file": None},
+    }})
+    prof = deserialize_config(raw).profiles["work"]
+    assert prof.git_email is None
+    assert prof.google.refresh_token_ref is None
+    assert prof.github.token_ref is None
+    assert prof.aws.region is None and prof.oci.profile is None
+
+
+def test_the_leaf_check_covers_every_field_of_every_service_block():
+    """Derived from the annotations, so a new field is covered as it is declared.
+
+    Hand-listing the fields to check is how a check drifts from the dataclass it
+    guards: the field added next release is the one nobody remembers to add
+    here. This asserts the derivation actually reaches every field, so a future
+    annotation the reader cannot classify (and therefore skips) fails here rather
+    than silently opening the gap again.
+    """
+    from mien.config import (AtlassianService, AWSService, GoogleService,
+                             NotionService, OCIService, _leaf_specs)
+    from dataclasses import fields as dc_fields
+    for cls in (GoogleService, GitHubService, SlackWorkspace, AWSService, OCIService,
+                AtlassianService, NotionService):
+        assert set(_leaf_specs(cls)) == {f.name for f in dc_fields(cls)}, cls.__name__
+
+
+def test_the_serializers_own_output_survives_the_leaf_check():
+    """A round-trip of a fully populated config, every service present.
+
+    The check runs on what `_config_to_dict` writes, so anything mien serializes
+    that the check would reject is a config mien can no longer open.
+    """
+    from mien.config import (AtlassianService, AWSService, NotionService,
+                             OCIService, ProjectEnvScope)
+    cfg = Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="keyring", options={"service_prefix": "mien-"}),
+        bootstrap={"gcp_account": "me@x.example"},
+        secret_naming=SecretNaming(default="d-{profile}", slack_token="s-{workspace}"),
+        profiles={
+            "work": Profile(
+                name="work",
+                google=GoogleService(
+                    email="me@x.example", oauth_client_id="cid",
+                    oauth_client_secret_ref=None, refresh_token_ref=None,
+                    adc_ref=None, gcloud_config_name="work", default_project=None),
+                github=GitHubService(username="u", host="github.com", token_ref="r"),
+                slack=[SlackWorkspace(workspace="team-a", user_token_ref="r")],
+                aws=AWSService(region="eu-west-1", profile="work"),
+                oci=OCIService(profile="WORK"),
+                atlassian=AtlassianService(email="me@x.example", base_url="https://x",
+                                           api_token_ref="r"),
+                notion=NotionService(api_token_ref="r"),
+                project_env=[ProjectEnvScope(match="*/work", env={"AWS_PROFILE": "work"})],
+                default_for=["*/Projects/acme"], owns_remotes=["github.com/acme/*"],
+                git_email="me@x.example",
+            ),
+            "bare": Profile(name="bare"),
+        },
+    )
+    assert deserialize_config(serialize_config(cfg)) == cfg
+
+
+def test_a_serialized_slack_workspace_still_carries_a_null_team_id():
+    """Deliberate, and not to be tidied away: it is a write-side compat shim.
+
+    `SlackWorkspace.team_id` is gone from the dataclass and nothing reads it, but
+    this same JSON is what `mien push` stores as the shared backend manifest, and
+    the mien that reads it may be an OLDER one on another machine. There,
+    `team_id` was a required positional with no default, so a workspace block
+    without the key raises `TypeError: missing 1 required positional argument`
+    inside `SlackWorkspace(**w)`. `mien sync` on that machine shows a traceback;
+    `mien init` swallows the same exception into "(manifest check skipped: ...)",
+    exits 0, and leaves that machine with the empty config init just wrote —
+    every identity gone, almost silently. Writing the null keeps those readers
+    working, and the read side already drops it (`_RETIRED_SERVICE_KEYS`).
+
+    The other two fields retired alongside it need no shim: both
+    `GoogleService.gcloud_login_required` and `Profile.git_name` had defaults, so
+    an older mien constructs them fine when the key is absent.
+    """
+    cfg = Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="gcp_secret_manager", options={"project": "p"}),
+        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        profiles={"work": Profile(name="work", slack=[
+            SlackWorkspace(workspace="team-a", user_token_ref="r"),
+            SlackWorkspace(workspace="team-b", user_token_ref="r2"),
+        ])},
+    )
+    written = json.loads(serialize_config(cfg))["profiles"]["work"]["slack"]
+    assert [w["workspace"] for w in written] == ["team-a", "team-b"]
+    for w in written:
+        assert "team_id" in w and w["team_id"] is None
+    # And reading it back is unaffected: the key is dropped, not resurrected.
+    back = deserialize_config(serialize_config(cfg)).profiles["work"].slack
+    assert back == cfg.profiles["work"].slack
+    assert not hasattr(back[0], "team_id")

@@ -573,6 +573,26 @@ def test_default_for_missing_defaults_empty():
     ('{"$schema_version": 1,'
      ' "secrets_backend": {"type": "macos_keychain", "project": "p"}}',
      "unknown option 'project'"),
+    # `type` was the one leaf popped out of its block and handed to
+    # `BackendConfig` unchecked. An unhashable one died in
+    # `ensure_known_backend_options`'s `BACKEND_OPTIONS.get(...)` as a bare
+    # `TypeError` out of `deserialize_config` — which every surface calls, so
+    # `mien guard` exited 0 with both streams empty and `mien list` printed a
+    # traceback. `is_cloud_backend`'s set lookup is the same crash one command
+    # further on. Hashable-but-wrong types are rejected here too: `null` and `5`
+    # are not backend names, so "unknown secrets backend 5" would send the reader
+    # hunting for a backend called 5 rather than saying the value is the wrong
+    # shape, and deferring them would make the message depend on hashability.
+    ('{"$schema_version": 1, "secrets_backend": {"type": ["keyring"]}}',
+     r"secrets_backend: 'type' must be a string, got list: \['keyring'\]"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": {"name": "keyring"}}}',
+     r"secrets_backend: 'type' must be a string, got dict: \{'name': 'keyring'\}"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": null}}',
+     "secrets_backend: 'type' must be a string, got NoneType: None"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": 5}}',
+     "secrets_backend: 'type' must be a string, got int: 5"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": true}}',
+     "secrets_backend: 'type' must be a string, got bool: True"),
     # `envs` builds a scope that matches and exports nothing: no AWS_PROFILE, the
     # tool falls back to its own default account, the command runs as somebody
     # else. Same class of failure as a mistyped profile key, same treatment.
@@ -790,6 +810,33 @@ def test_an_unrecognized_backend_type_keeps_its_own_error():
            "profiles": {}}
     cfg = deserialize_config(raw)
     assert cfg.secrets_backend.options == {"vault_ocid": "ocid1..."}
+
+
+def test_a_backend_type_is_checked_for_type_at_parse_time_and_for_value_later():
+    """The split the `type` check must keep: wrong shape here, wrong name there.
+
+    A `type` that is not a string cannot name any backend, so it is a config
+    error like every other mistyped leaf and is reported while parsing. A `type`
+    that *is* a string but names no backend mien has is `ensure_known_backend`'s
+    to answer, deliberately deferred to the first command that reaches for the
+    backend — so a config-only command (`mien which`, `mien list`) still works.
+    Collapsing either direction breaks something: rejecting unknown strings at
+    parse time takes the migration story away from a retired backend and makes
+    every config-only command fail, while deferring non-strings puts an
+    unhashable value into `BACKEND_OPTIONS.get` and `is_cloud_backend`'s set
+    lookup, where it escapes as a `TypeError` the fail-open surfaces ignore.
+    """
+    from mien.backends import UnknownBackendType, ensure_known_backend
+
+    with pytest.raises(ConfigError, match="'type' must be a string"):
+        deserialize_config({"$schema_version": 1,
+                            "secrets_backend": {"type": ["keyring"]}})
+
+    cfg = deserialize_config({"$schema_version": 1,
+                              "secrets_backend": {"type": "keychain"}})
+    assert cfg.secrets_backend.type == "keychain"
+    with pytest.raises(UnknownBackendType, match="unknown secrets backend"):
+        ensure_known_backend(cfg.secrets_backend)
 
 
 @pytest.mark.parametrize("version_key", ["$schema_version", "schema_version"])

@@ -773,6 +773,28 @@ def _config_from_dict(raw: dict) -> Config:
             "secrets_backend.type is missing — mien cannot tell where your "
             "secrets live. Expected one of: gcp_secret_manager, macos_keychain, "
             "keyring.")
+    # `type` was the one leaf that never reached `_check_leaf_values`: popped out
+    # of the block and handed straight to `BackendConfig`, whatever it held. A
+    # non-string one then escaped `ensure_known_backend_options`'s
+    # `BACKEND_OPTIONS.get(cfg.type)` as a bare `TypeError: unhashable type:
+    # 'list'` — out of `deserialize_config`, which every surface calls, so `mien
+    # guard` exited 0 with both streams empty and waved through the very
+    # mis-identity commit it exists to block. Checked here, against the same
+    # annotation as every other leaf, so the answer cannot drift from
+    # `BackendConfig.type: str`, and so nothing downstream ever sees a `type` that
+    # is not a string. `scalars_only` skips `options`, which is this block's
+    # remaining keys rather than a key of its own.
+    #
+    # This is the TYPE check only. A `type` that is a string but not a backend
+    # mien has (`"keychain"`, the retired `"oci_vault"`) still belongs to
+    # `ensure_known_backend`, which has the migration story and is deliberately
+    # deferred to the first command that reaches for the backend. `null` and `5`
+    # are rejected here with the other wrong types rather than left to that
+    # check: they are not backend names, so "unknown secrets backend 5" would
+    # send the reader looking for a backend called 5 instead of telling them the
+    # value is the wrong shape — and splitting them off would make the
+    # user-visible contract depend on whether a value happens to be hashable.
+    _check_leaf_values("secrets_backend", sb_raw, BackendConfig, scalars_only=True)
     sb_type = sb_raw.pop("type")
     secrets_backend = BackendConfig(type=sb_type, options=sb_raw)
     # Imported here, not at module scope: `mien.backends` imports this module, so

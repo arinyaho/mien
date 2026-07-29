@@ -335,6 +335,34 @@ def _write_broken_cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("MIEN_CONFIG", str(cfg))
 
 
+def _write_cfg_with_a_non_string_backend_type(tmp_path, monkeypatch):
+    """Valid JSON, well-formed everywhere except `secrets_backend.type`.
+
+    The quietest shape of "unreadable": the file parses as JSON and every
+    identity in it is spelled correctly, so the operator has no reason to
+    suspect anything. `type` alone is the wrong type, and it used to be the one
+    leaf handed to `BackendConfig` unchecked — the resulting `TypeError` came
+    out of `deserialize_config`, which is not `ConfigError`, so guard neither
+    enforced nor announced.
+
+    The profiles are the same ones as `test_guard_blocks_a_wrong_active_identity`
+    so the two tests differ in exactly one key: with a string `type` this config
+    makes guard refuse, which is what the announcement is standing in for.
+    """
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({
+        "$schema_version": 1,
+        "secrets_backend": {"type": ["macos_keychain"]},
+        "bootstrap": {},
+        "secret_naming": {"default": "d", "slack_token": "s"},
+        "profiles": {
+            "work": {"owns_remotes": ["github.com/acme-*/*"]},
+            "personal": {"owns_remotes": ["github.com/me/*"]},
+        },
+    }))
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -425,6 +453,39 @@ def test_guard_fails_open_on_an_unreadable_config_and_says_it_is_not_enforcing(
     # A pre-commit hook's stdout is not a place to narrate; the warning is a
     # diagnostic, so it goes to stderr and nowhere else.
     assert result.stdout == ""
+
+
+def test_guard_announces_rather_than_going_quiet_on_a_non_string_backend_type(
+        tmp_path, monkeypatch):
+    """The consequence, not the exception type: guard may not fall silent here.
+
+    These are the inputs of `test_guard_blocks_a_wrong_active_identity` — the
+    config even names the same two profiles — with `secrets_backend.type` alone
+    changed from a string to a list. That made `deserialize_config` raise a bare
+    `TypeError`, which the fail-open surfaces do not recognize as a config
+    failure, so guard exited 0 with both streams empty: a pre-commit hook waving
+    through the exact mis-identity commit it is installed to block, saying
+    nothing. Either outcome is acceptable — refuse, or fail open and admit it —
+    but not silence.
+    """
+    _write_cfg_with_a_non_string_backend_type(tmp_path, monkeypatch)
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "NOT enforcing" in result.stderr
+    assert "config unreadable" in result.stderr
+    assert result.stdout == ""
+
+
+def test_statusline_says_so_on_a_non_string_backend_type(tmp_path, monkeypatch):
+    # Same config, the other always-on surface: a blank segment would read as
+    # "nothing to report" when mien can no longer tell who you are here.
+    _write_cfg_with_a_non_string_backend_type(tmp_path, monkeypatch)
+    result = _run("/flat/api", monkeypatch,
+                  remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout
+    assert "🟢" not in result.stdout
 
 
 def test_guard_blocks_a_wrong_active_identity(tmp_path, monkeypatch):

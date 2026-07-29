@@ -367,7 +367,9 @@ def _env_map_from_raw(where: str, value: object) -> dict[str, str]:
     - A non-string VALUE dies in ``ambient._emit_value`` as a bare
       ``AttributeError`` (``.replace`` on an int), which ``env_sync_cmd`` does
       not catch and ``MienGroup`` does not translate: ``mien env sync`` exits 1
-      with nothing on stdout or stderr. An unquoted number (``{"PORT": 8080}``)
+      with a raw traceback on stderr rather than the actionable ``Error:`` line
+      every other config fault gets, and neither ``ambient.zsh`` nor
+      ``~/.zshenv`` is touched. An unquoted number (``{"PORT": 8080}``)
       is a plausible hand-edit, and the packaged schema declares this field
       ``dict[str, str]``.
     - A KEY that is not a shell identifier survives every gate downstream.

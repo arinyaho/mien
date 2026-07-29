@@ -616,8 +616,8 @@ def test_default_for_missing_defaults_empty():
     # sibling `match` two lines above was checked value and all. A non-string
     # value reaches `ambient._emit_value` and dies on `.replace` as a bare
     # AttributeError, which `env_sync_cmd` does not catch and `MienGroup` does
-    # not translate: `mien env sync` exits 1 with both streams empty. An
-    # unquoted number is the likeliest hand-edit of the four.
+    # not translate: `mien env sync` exits 1 with a raw traceback instead of an
+    # actionable error. An unquoted number is the likeliest hand-edit of the four.
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "profiles": {"work": {"project_env":'
      ' [{"match": "*/work", "env": {"PORT": 8080}}]}}}',

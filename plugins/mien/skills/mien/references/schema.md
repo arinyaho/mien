@@ -92,20 +92,24 @@ Every profile-level key is optional; a service the profile omits (or sets to `nu
 
 Within a block, a **missing required field** is the same class of error as an unknown one, reported with the block's valid key list.
 
+**Required-to-be-present and may-hold-`null` are different rules**, and a hand-edit needs both. A field is required because it declares no default, and it accepts `null` because its type says so — so a required key can legitimately carry `null` (every `"...|null"` key in the `google` block below is required *and* nullable), and dropping the key is an error even where `null` is fine. Conversely, a key you may omit entirely still has to hold a value of its declared type when you do write it.
+
 ### `google`
 ```jsonc
 {
   "email": "...",
   "oauth_client_id": "...",
   "oauth_client_secret_ref": "<backend-ref>|null",
-  "refresh_token_ref":       "<backend-ref>",
+  "refresh_token_ref":       "<backend-ref>|null",
   "adc_ref":                 "<backend-ref>|null",
   "gcloud_config_name":      "<typically equals profile name>",
   "default_project":         "..."|null
 }
 ```
 
-All seven keys are required when the block is present. The three nullable ones (`oauth_client_secret_ref`, `adc_ref`, `default_project`) may hold `null`, but the key itself must still be there.
+All seven keys are required to be *present* when the block is present. Four of them may also hold `null`: `oauth_client_secret_ref`, `refresh_token_ref`, `adc_ref` and `default_project`. The other three — `email`, `oauth_client_id`, `gcloud_config_name` — must be strings.
+
+`null` here is a working state, not an unset field. A gcloud-login-only profile has no stored refresh token and no stored OAuth client secret; every reader guards on that (`mien env`, `mien whoami`, `mien logout`), mien's own configs carry `null` there, and it is exactly the shape the `gcloud_login_required` retirement remedy above tells you to write. Omitting the key is still an error — presence and nullability are separate rules, and `null` is how you say "this profile has no such secret".
 
 ### `github`
 ```jsonc
@@ -238,7 +242,7 @@ renders every profile's scopes into `~/.config/mien/ambient.zsh` as
 [{ "match": "*/work/acme", "env": { "AWS_PROFILE": "work" } }]
 ```
 
-Each entry must be a JSON object carrying a `match` glob; `env` is optional and must itself be an object of plain values. `match` and `env` are the only accepted keys — an entry with no `match`, or one carrying any other key, is a `ConfigError`. `match` must be a non-empty string: a non-string one would reach the renderer as an `AttributeError` nothing catches, and an *empty* one normalizes to a base of `""`, so the emitted `case "$PWD/" in /*)` fires in every directory and exports that scope's env everywhere — the same silent widening the list-of-strings rule exists to stop. The unknown-key rule matters most here: a typo'd `env` would otherwise leave the scope exporting nothing, so the directory silently falls back to whatever account the underlying CLI defaults to.
+Each entry must be a JSON object carrying a `match` glob; `env` is optional and must itself be a JSON object whose **keys are shell identifiers** — letters, digits and underscores, never starting with a digit (`[A-Za-z_][A-Za-z0-9_]*`, ASCII only, which is what zsh's `export` accepts, not what Python's `isidentifier()` does) — and whose **values are strings**. Both halves are checked because each pair is written into `ambient.zsh` verbatim as `export <key>=<value>`: a non-string value (`{"PORT": 8080}` is a plausible hand-edit) dies in the renderer as a bare `AttributeError` nothing catches, so `mien env sync` exits 1 with nothing on stdout or stderr; and a key that is not an identifier survives every gate downstream — `zsh -n` *parses* `export 2FA="x"`, so the file is written, and sourcing it then fails at that line and **abandons the rest of the file**, silently dropping every later export, including every other profile's scopes. `export MY VAR="x"` is quieter still: valid syntax that exports `MY` empty and never sets the variable you wrote. `match` and `env` are the only accepted keys — an entry with no `match`, or one carrying any other key, is a `ConfigError`. `match` must be a non-empty string: a non-string one would reach the renderer as an `AttributeError` nothing catches, and an *empty* one normalizes to a base of `""`, so the emitted `case "$PWD/" in /*)` fires in every directory and exports that scope's env everywhere — the same silent widening the list-of-strings rule exists to stop. The unknown-key rule matters most here: a typo'd `env` would otherwise leave the scope exporting nothing, so the directory silently falls back to whatever account the underlying CLI defaults to.
 
 `match` follows the same directory-glob rules as `default_for` (the directory
 itself and everything under it; a trailing `/*` or `/` is normalized away).

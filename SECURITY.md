@@ -79,7 +79,7 @@ It only *selects among* credentials that remain on disk for:
 | OCI, always | `~/.oci/config` and the API-key PEM it names. `mien` stores no OCI secret at all |
 | gcloud CLI identity | The gcloud configuration and its credential store. `CLOUDSDK_ACTIVE_CONFIG_NAME` names a configuration; it does not supply one |
 | GitHub SSH, path mode | Your private key stays in `~/.ssh` |
-| `mien`'s own backend access | The bootstrap Google ADC, for the GCP backend, or `~/.oci/config` for the OCI backend |
+| `mien`'s own backend access | The bootstrap Google ADC, for the GCP backend |
 | `macos_keychain` backend | Your login keychain, `~/Library/Keychains/` — encrypted at rest, but the secrets are in `$HOME` |
 | `keyring` backend | The OS credential store, typically `~/.local/share/keyrings` — same caveat |
 
@@ -90,15 +90,14 @@ So `mien` writing no token files into your home directory is true of the files i
 | Backend | Where values live | Authenticated by | A compromise of that yields | Network |
 |---|---|---|---|---|
 | `gcp_secret_manager` | Google Secret Manager | Application Default Credentials | read, write and delete of every `mien` secret the principal's IAM allows, plus the config manifest | yes |
-| `oci_vault` | OCI Vault | `~/.oci/config` and the API key it names | the same, scoped by OCI IAM | yes |
 | `macos_keychain` | macOS login keychain | your logged-in session | every `mien-*` item | no |
 | `keyring` | OS credential store | an unlocked desktop session | every stored item | no |
 
-Compromise of the bootstrap credential is equivalent to compromise of every identity the cloud backends hold. It is the single most valuable thing on the machine and deserves the strongest protection you can give it.
+Compromise of the bootstrap credential is equivalent to compromise of every identity the cloud backend holds. It is the single most valuable thing on the machine and deserves the strongest protection you can give it.
 
 **The manifest.** With a cloud backend, `mien` stores a copy of the configuration as a secret named `mien-config-manifest`, and pushes it after `mien login` and `mien logout`, on a best-effort basis — a failed push is a warning, not an error. `mien init` writes the local config without pushing, and `mien push` is the explicit manual path. It contains references and identifiers only — no secret value — with one exception: values you place in `project_env` are copied verbatim, so a secret typed there is uploaded. Do not put secrets in `project_env`.
 
-Both cloud backends update the manifest in place on each push — a new version of one fixed secret — so the copy a second machine pulls tracks your latest config. (Nothing deletes the manifest; it is only ever rewritten.)
+The cloud backend updates the manifest in place on each push — a new version of one fixed secret — so the copy a second machine pulls tracks your latest config. (Nothing deletes the manifest; it is only ever rewritten.)
 
 Two commands adopt that manifest. `mien init --yes` imports it without prompting, and `mien sync` pulls it and replaces the local config — also without prompting under `--yes`. Its interactive confirmation lists only profile *names*, so a changed `project_env` value shows up as `~ change: work` and nothing more. A backend an attacker controls can therefore redefine every profile — including which directories claim which identity, and including the `project_env` values that become executable code — through either path.
 
@@ -118,7 +117,7 @@ The `env-<random>.sh` file deserves its own note, since it holds every exported 
 
 `mien-unset` clears the variables. It does not delete anything on disk. Bare `mien unset` only prints the `unset` lines for you to eval, and unlike `mien use` it has no terminal guard, so it looks like it worked.
 
-`mien logout` removes a secret from the backend — but not always immediately. On OCI it *schedules* deletion, which is cancellable for up to 30 days, so the value stays retrievable until that elapses. On GCP the secret and all its versions are destroyed at once; note though that re-running `mien login` for a service adds a new version without disabling the old ones, so rotating this way leaves the previous value readable until you delete the secret. Logout also does not reach into shells that already hold the value, or the files they point at — those keep working until the shell exits or a sweep runs.
+`mien logout` removes a secret from the backend. On GCP the secret and all its versions are destroyed at once; note though that re-running `mien login` for a service adds a new version without disabling the old ones, so rotating this way leaves the previous value readable until you delete the secret. Logout also does not reach into shells that already hold the value, or the files they point at — those keep working until the shell exits or a sweep runs.
 
 ## Known weaknesses
 

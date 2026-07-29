@@ -16,10 +16,11 @@ from mien.ambient import (
     unexpandable_scope_vars,
     write_ambient,
 )
-from mien.backends import load_backend
+from mien.backends import UnknownBackendType, ensure_known_backend, load_backend
 from mien.ephemeral import EphemeralStore
 from mien.config import (
     AWSService,
+    ConfigError,
     AtlassianService,
     BackendConfig,
     Config,
@@ -35,7 +36,13 @@ from mien.config import (
     save_config,
 )
 from mien.env import build_env
-from mien.manifest import MANIFEST_SECRET_NAME, is_cloud_backend, pull_manifest, push_manifest
+from mien.manifest import (
+    MANIFEST_SECRET_NAME,
+    ManifestError,
+    is_cloud_backend,
+    pull_manifest,
+    push_manifest,
+)
 from mien.oauth import exchange_refresh_token, google_installed_app_flow
 from mien.discover import discover_all, render_report
 from mien.project import (ensure_gitignored, find_declaration, is_allowed,
@@ -60,12 +67,52 @@ GOOGLE_DEFAULT_SCOPES = [
 
 def _friendly_backend_message(exc: BaseException) -> str | None:
     """Translate noisy backend exceptions to actionable hints."""
+    if isinstance(exc, UnknownBackendType):
+        # Already written for a human, by the module that knows which backends
+        # exist. Carrying it through here is what turns it into a clean
+        # "Error: ..." instead of a traceback.
+        return str(exc)
+
+    # Before the plain-ConfigError branch: ManifestError subclasses it, and the
+    # local-config advice below is all false for a manifest (wrong document,
+    # wrong fix, and neither the status line nor guard is affected).
+    if isinstance(exc, ManifestError):
+        return (
+            f"{exc}\n\n"
+            f"That is the backend's config manifest (the {MANIFEST_SECRET_NAME!r} "
+            "secret), not your local config — most likely written by a mien of a "
+            "different version.\n"
+            "Your local config parses fine, so the status line and `mien guard` are "
+            "unaffected; only syncing from the backend is blocked.\n\n"
+            "If your local config is the copy you want to keep, overwrite the "
+            "manifest with it:\n"
+            "  mien push"
+        )
+
+    if isinstance(exc, ConfigError):
+        return (
+            f"{exc}\n\n"
+            f"The config is at {config_path()}.\n"
+            # "read", not "parse": a ConfigError also covers a config that is
+            # there but cannot be opened at all (permissions, a directory, a
+            # dangling symlink), where "until it parses" would misdirect.
+            "Until mien can read it, it cannot tell which identity is which — so "
+            "the status line shows a warning in place of your identity, and `mien "
+            "guard` stops enforcing (it says so instead of blocking)."
+        )
+
     try:
         from google.api_core import exceptions as gerr
     except ImportError:
         gerr = None  # type: ignore[assignment]
 
-    cfg = load_config()
+    # Guarded: this runs inside an exception handler, and a config that itself
+    # fails to parse would re-raise here and bury the original error under a
+    # chained traceback.
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = None
     project = "<project>"
     account = "<bootstrap-email>"
     if cfg:
@@ -229,21 +276,14 @@ def _verify_backend(backend, backend_type: str, bootstrap: dict) -> None:
                 f"      --member=user:{account} --role=roles/secretmanager.admin"
             )
             msg.append("Then: mien doctor")
-        elif backend_type == "oci_vault":
-            msg.append("")
-            msg.append("Check ~/.oci/config and that the API key PEM exists.")
-            msg.append("Then: mien doctor")
         raise click.ClickException("\n".join(msg))
 
 
 @main.command("init")
-@click.option("--backend", type=click.Choice(["gcp_secret_manager", "oci_vault", "macos_keychain", "keyring"]),
+@click.option("--backend", type=click.Choice(["gcp_secret_manager", "macos_keychain", "keyring"]),
               help="Skip the backend picker.")
 @click.option("--project", help="(gcp) project ID")
 @click.option("--bootstrap-email", help="(gcp) bootstrap account email")
-@click.option("--vault-ocid", help="(oci) vault OCID")
-@click.option("--compartment-ocid", help="(oci) compartment OCID")
-@click.option("--region", default=None, help="(oci) region (default: ap-chuncheon-1)")
 @click.option("--service-prefix", default=None, help="(keychain) service prefix (default: 'mien-')")
 @click.option("--yes", "-y", is_flag=True, help="Overwrite existing config and auto-import an existing backend manifest without prompting.")
 @click.option("--no-import", "no_import", is_flag=True,
@@ -252,9 +292,6 @@ def init_cmd(
     backend: str | None,
     project: str | None,
     bootstrap_email: str | None,
-    vault_ocid: str | None,
-    compartment_ocid: str | None,
-    region: str | None,
     service_prefix: str | None,
     yes: bool,
     no_import: bool,
@@ -269,11 +306,10 @@ def init_cmd(
     if backend is None:
         click.echo("Pick a secrets backend:")
         click.echo("  1) gcp_secret_manager")
-        click.echo("  2) oci_vault")
-        click.echo("  3) macos_keychain")
-        click.echo("  4) keyring (Linux Secret Service / Windows Credential Locker)")
-        choice = click.prompt("Choice", type=click.Choice(["1", "2", "3", "4"]))
-        backend = {"1": "gcp_secret_manager", "2": "oci_vault", "3": "macos_keychain", "4": "keyring"}[choice]
+        click.echo("  2) macos_keychain")
+        click.echo("  3) keyring (Linux Secret Service / Windows Credential Locker)")
+        choice = click.prompt("Choice", type=click.Choice(["1", "2", "3"]))
+        backend = {"1": "gcp_secret_manager", "2": "macos_keychain", "3": "keyring"}[choice]
 
     if backend == "gcp_secret_manager":
         if not project:
@@ -285,18 +321,6 @@ def init_cmd(
         bootstrap_email = _clean_email(bootstrap_email)
         backend_cfg = BackendConfig(type="gcp_secret_manager", options={"project": project})
         bootstrap = {"gcp_account": bootstrap_email}
-    elif backend == "oci_vault":
-        if not vault_ocid:
-            vault_ocid = click.prompt("Vault OCID").strip()
-        if not compartment_ocid:
-            compartment_ocid = click.prompt("Compartment OCID").strip()
-        if region is None:
-            region = click.prompt("Region", default="ap-chuncheon-1")
-        backend_cfg = BackendConfig(
-            type="oci_vault",
-            options={"vault_ocid": vault_ocid.strip(), "compartment_ocid": compartment_ocid.strip(), "region": region},
-        )
-        bootstrap = {}
     elif backend == "keyring":
         if service_prefix is None:
             service_prefix = click.prompt("Service prefix", default="mien-")
@@ -821,7 +845,7 @@ def login_cmd(
         ref = backend.put(ref_name, token.encode("utf-8"))
         prof = cfg.profiles.get(profile_name) or Profile(name=profile_name)
         prof.slack = [w for w in prof.slack if w.workspace != workspace]
-        prof.slack.append(SlackWorkspace(workspace=workspace, team_id=None, user_token_ref=ref))
+        prof.slack.append(SlackWorkspace(workspace=workspace, user_token_ref=ref))
         cfg.profiles[profile_name] = prof
         _save_and_sync(cfg, backend)
         click.echo(f"stored slack token for {profile_name}/{workspace} at {ref}")
@@ -862,7 +886,6 @@ def login_cmd(
             adc_ref=None,
             gcloud_config_name=profile_name,
             default_project=None,
-            gcloud_login_required=False,
         )
         cfg.profiles[profile_name] = prof
         _save_and_sync(cfg, backend)
@@ -1020,10 +1043,9 @@ def _profile_fingerprint(prof) -> str:
 def sync_cmd(dry_run: bool, yes: bool) -> None:
     """Pull the config manifest from the backend and reconcile local config."""
     cfg = _require_config()
+    ensure_known_backend(cfg.secrets_backend)
     if not is_cloud_backend(cfg.secrets_backend):
-        raise click.ClickException(
-            "sync requires a cloud backend (gcp_secret_manager / oci_vault)"
-        )
+        raise click.ClickException("sync requires a cloud backend (gcp_secret_manager)")
     backend = load_backend(cfg.secrets_backend)
     remote = pull_manifest(backend)
     if remote is None:
@@ -1060,10 +1082,13 @@ def sync_cmd(dry_run: bool, yes: bool) -> None:
 def push_cmd() -> None:
     """Force-push the current local config to the backend manifest."""
     cfg = _require_config()
+    # Before the local/cloud split: a backend type mien no longer knows is not a
+    # local backend, and must not be reported as a successful no-op.
+    ensure_known_backend(cfg.secrets_backend)
     if not is_cloud_backend(cfg.secrets_backend):
         # Intentionally exit 0 (not an error like sync): pushing a manifest to a
         # local-only backend is simply meaningless, not a user mistake.
-        click.echo("push is a no-op for local backends (macos_keychain)")
+        click.echo("push is a no-op for local backends (macos_keychain, keyring)")
         return
     backend = load_backend(cfg.secrets_backend)
     push_manifest(cfg, backend)
@@ -1456,13 +1481,23 @@ def statusline_cmd() -> None:
     Secret-free and offline: it reads only the config's profile names and scopes,
     never the backend, so it is cheap enough to run at status-line frequency. And
     it never errors out — a status line that crashes is worse than a blank one —
-    so any failure (no config, unreadable input) prints nothing and exits 0.
+    so any failure exits 0: no config or unreadable input prints nothing. An
+    unreadable config is the one exception: it shows a compact marker instead of
+    staying blank, because a blank segment reads as "nothing to report" when in
+    fact mien can no longer tell who you are here.
     """
     try:
         cfg = load_config()
         if cfg is None:
             return  # mien is not set up here — stay silent rather than nag.
         click.echo(_identity_segment(cfg, _statusline_cwd()))
+    except ConfigError:
+        # Deliberately stdout, not stderr: Claude Code renders this command's
+        # stdout as the status line and discards the rest, so a message on
+        # stderr would leave the segment blank — the very silence this exists to
+        # break. Compact by necessity too: it has to fit one status-line row, so
+        # it points at `mien doctor` rather than carrying the parse error.
+        click.echo("\033[31m⚠ mien:config unreadable — run 'mien doctor'\033[0m")
     except Exception:
         return
 
@@ -1481,14 +1516,22 @@ def prompt_cmd() -> None:
         # bash
         PROMPT_COMMAND='PS1="… $(mien prompt) "'
 
-    Secret-free and never errors — prints nothing on any failure, and nothing
-    when mien is unconfigured — so it is safe to run on every prompt.
+    Secret-free and never errors — prints nothing when mien is unconfigured or
+    on an unexpected failure, so it is safe to run on every prompt. An
+    unreadable config shows a compact marker instead of staying blank, because
+    a blank segment reads as "nothing to report" when in fact mien can no
+    longer tell who you are here.
     """
     try:
         cfg = load_config()
         if cfg is None:
             return
         click.echo(_identity_segment(cfg, _logical_cwd()), nl=False)
+    except ConfigError:
+        # Deliberately stdout, not stderr: a prompt redraws constantly and its
+        # stderr goes straight to the terminal, so a full message there would
+        # spam every redraw. The marker rides along in the segment instead.
+        click.echo("\033[31m⚠mien:config\033[0m", nl=False)
     except Exception:
         return
 
@@ -1599,6 +1642,12 @@ def guard_cmd(force: bool) -> None:
             env_profile, claimed, source=source or "dir",
             author_profile=author, env_known=env_known,
         )
+    except ConfigError as exc:
+        # Still fail open — a broken config must not wedge your commits — but a
+        # guard that has silently stopped guarding is worse than one that says so.
+        click.echo(
+            f"mien: guard is NOT enforcing — config unreadable: {exc}", err=True)
+        return
     except Exception:
         return  # fail open: never wedge an action because guard itself broke.
     if reason:
@@ -1784,7 +1833,7 @@ def doctor_cmd(gc: bool) -> None:
 
 
 @main.command("preflight")
-@click.option("--backend", type=click.Choice(["gcp_secret_manager", "oci_vault", "macos_keychain"]),
+@click.option("--backend", type=click.Choice(["gcp_secret_manager", "macos_keychain"]),
               default="gcp_secret_manager", help="Backend to check prerequisites for.")
 @click.option("--project", help="(gcp) project to verify access on")
 @click.option("--account", help="(gcp) account email to verify")
@@ -1841,11 +1890,6 @@ def preflight_cmd(backend: str, project: str | None, account: str | None, as_jso
         else:
             add("ADC present", False, "no application_default_credentials.json",
                 f"gcloud auth application-default login --account={account or '<email>'}")
-
-    elif backend == "oci_vault":
-        oci_cfg = Path.home() / ".oci" / "config"
-        add("~/.oci/config", oci_cfg.exists(), "",
-            "Create an API key in OCI Console and run `oci setup config`")
 
     elif backend == "macos_keychain":
         # The backend talks to the Keychain in-process, not via the security CLI,

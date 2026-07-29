@@ -9,7 +9,7 @@ from mien.resolve import (AmbiguousScope, claimed_profile, expand_scope,
 def _gp(name, *, google=None, atlassian=None, github=None):
     g = GoogleService(email=google, oauth_client_id="c", oauth_client_secret_ref=None,
                       refresh_token_ref=None, adc_ref=None, gcloud_config_name=name,
-                      default_project=None, gcloud_login_required=True) if google else None
+                      default_project=None) if google else None
     a = AtlassianService(email=atlassian, api_token_ref="r",
                          base_url="https://x.atlassian.net") if atlassian else None
     h = GitHubService(username=github, host="github.com", token_ref="r") if github else None
@@ -44,7 +44,7 @@ class TestProfileForEmail:
                                   email="me@acme.example", oauth_client_id="c",
                                   oauth_client_secret_ref=None, refresh_token_ref=None,
                                   adc_ref=None, gcloud_config_name="work",
-                                  default_project=None, gcloud_login_required=True))}
+                                  default_project=None))}
         # the commit address differs from the Google login, yet still attributes
         assert profile_for_email(ps, "commits@acme.example") == "work"
         assert profile_for_email(ps, "me@acme.example") == "work"

@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+import re
+from collections.abc import Iterable
+from dataclasses import MISSING, asdict, dataclass, field
+from dataclasses import fields as dc_fields
+from functools import lru_cache
 from pathlib import Path
+from types import UnionType
+from typing import Union, get_args, get_origin, get_type_hints
 
 SCHEMA_VERSION = 1
 
@@ -25,11 +31,16 @@ class GoogleService:
     email: str
     oauth_client_id: str
     oauth_client_secret_ref: str | None
-    refresh_token_ref: str
+    # Null is a real, working state, not an unset field: a gcloud-login-only
+    # profile has no stored refresh token, every reader guards on it
+    # (`mien env`, `mien whoami`, `mien logout`), and mien's own configs carry
+    # null here. Annotated accordingly — the leaf check reads these annotations,
+    # so `str` would reject a config that loads today. The key is still required
+    # to be *present*: that comes from having no default, not from the type.
+    refresh_token_ref: str | None
     adc_ref: str | None
     gcloud_config_name: str
     default_project: str | None
-    gcloud_login_required: bool = False
 
 
 @dataclass
@@ -44,7 +55,6 @@ class GitHubService:
 @dataclass
 class SlackWorkspace:
     workspace: str
-    team_id: str | None
     user_token_ref: str
 
 
@@ -108,7 +118,6 @@ class Profile:
     # commit's `user.email` disagrees with the identity acting here. Set it when
     # you commit under an address none of the profile's accounts carry.
     git_email: str | None = None
-    git_name: str | None = None
 
 
 @dataclass
@@ -137,20 +146,53 @@ def deserialize_config(raw: str | dict) -> Config:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid config JSON: {exc}") from exc
+            raise ConfigError(f"invalid config JSON: {exc}") from exc
     else:
         data = raw
+    data = _mapping_from_raw("config", data)
     version = data.get("$schema_version", data.get("schema_version"))
     if version != SCHEMA_VERSION:
-        raise ValueError(f"Unsupported schema_version {version!r}; expected {SCHEMA_VERSION}")
+        raise ConfigError(
+            f"Unsupported schema_version {version!r}; expected {SCHEMA_VERSION}")
+    # After the version check, not before: a config from a future schema should
+    # be told its version is unsupported, rather than blamed for a key that
+    # version legitimately added.
+    _reject_unknown_keys(
+        "config", data, _TOP_LEVEL_KEYS, advertised=_TOP_LEVEL_KEYS_ADVERTISED)
     return _config_from_dict(data)
 
 
 def load_config() -> Config | None:
+    """Load the config, or None when mien is simply not set up here.
+
+    "Not set up" means nothing is at the path — and only that. A config that is
+    *there* but cannot be read (mode 0600 owned by another user, a directory in
+    `MIEN_CONFIG`, a dangling symlink, an I/O error, bytes that are not text) is
+    a ConfigError, not a None: the file is present and mien still cannot tell
+    which identity is which, which is exactly what ConfigError means.
+
+    Translated here rather than in each caller so every surface gets it at once
+    — the fail-open ones (status line, prompt, guard) recognize ConfigError as
+    "I have stopped working" and would otherwise swallow an OSError in their
+    catch-all and go quiet, and `_friendly_backend_message` renders it as an
+    actionable error instead of an OSError traceback.
+    """
     path = config_path()
-    if not path.exists():
-        return None
-    return deserialize_config(path.read_text())
+    try:
+        raw = path.read_text()
+    except FileNotFoundError as exc:
+        # A dangling symlink reports ENOENT too, but there the operator did put
+        # a config in place and its target has since gone — present-and-broken,
+        # not absent, so it is announced rather than passed off as unconfigured.
+        if not path.is_symlink():
+            return None
+        raise ConfigError(
+            f"config at {path} is a symlink to a file that does not exist"
+        ) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        raise ConfigError(f"cannot read config at {path}: {reason}") from exc
+    return deserialize_config(raw)
 
 
 def save_config(cfg: Config) -> None:
@@ -166,7 +208,34 @@ def _config_to_dict(cfg: Config) -> dict:
         profiles[name] = {
             "google": asdict(prof.google) if prof.google else None,
             "github": asdict(prof.github) if prof.github else None,
-            "slack": [asdict(w) for w in prof.slack],
+            # `"team_id": None` is written deliberately, and is not a live
+            # field — `SlackWorkspace` has not carried one since it was retired,
+            # and nothing here or anywhere else reads it back (loading drops it,
+            # see `_RETIRED_SERVICE_KEYS`). It is a write-side compatibility shim
+            # for OLDER readers of the same config.
+            #
+            # This same JSON is what `mien push` stores as the shared backend
+            # manifest, and the mien that reads it may be an older one on another
+            # machine. In the mien that still had the field, `team_id` was a
+            # required positional with no default, so `SlackWorkspace(**w)` there
+            # raises `TypeError: missing 1 required positional argument` on a
+            # workspace block that has no `team_id` key at all. `mien sync` on
+            # that machine shows the traceback; `mien init` swallows it into
+            # "(manifest check skipped: ...)", exits 0, and leaves the machine
+            # with the empty config init just wrote — every identity gone, almost
+            # silently. Emitting the null keeps those readers working; they treat
+            # it as the value it always had.
+            #
+            # Drop this line once no mien old enough to require `team_id` can
+            # still read a manifest written here — i.e. every machine sharing a
+            # backend has upgraded past the removal. Nothing in the file itself
+            # will tell you; it is a fact about the fleet.
+            #
+            # The other two fields retired alongside it need no such shim:
+            # `GoogleService.gcloud_login_required` and `Profile.git_name` both
+            # had defaults, so an older mien constructs them fine when the key is
+            # absent.
+            "slack": [{**asdict(w), "team_id": None} for w in prof.slack],
             "aws": asdict(prof.aws) if prof.aws else None,
             "oci": asdict(prof.oci) if prof.oci else None,
             "atlassian": asdict(prof.atlassian) if prof.atlassian else None,
@@ -175,7 +244,6 @@ def _config_to_dict(cfg: Config) -> dict:
             "default_for": list(prof.default_for),
             "owns_remotes": list(prof.owns_remotes),
             "git_email": prof.git_email,
-            "git_name": prof.git_name,
         }
     return {
         "$schema_version": cfg.schema_version,
@@ -184,6 +252,24 @@ def _config_to_dict(cfg: Config) -> dict:
         "secret_naming": asdict(cfg.secret_naming),
         "profiles": profiles,
     }
+
+
+def _glob_string(must_be: str, value: object) -> str:
+    """Validate one glob string -- the unit a list-of-globs field is made of and
+    a ``project_env`` entry's ``match`` is.
+
+    ``must_be`` is the whole "<where> must be ..." clause rather than its parts,
+    so a caller checking every entry of a list can speak in the plural and one
+    checking a single value in the singular, while the "got <type>: <value>"
+    tail they share cannot drift apart. Every glob in the config is read by
+    ``fnmatch``/``re`` as text (``mien.resolve``, ``mien.ambient``), so a
+    wrong-typed one escapes as ``TypeError``/``AttributeError`` from whichever
+    command touches it first -- which the fail-open surfaces do not recognize as
+    a config failure at all. See ``_mapping_from_raw``.
+    """
+    if not isinstance(value, str):
+        raise ConfigError(f"{must_be}, got {type(value).__name__}: {value!r}")
+    return value
 
 
 def _glob_list_from_raw(
@@ -199,43 +285,595 @@ def _glob_list_from_raw(
     if value is None:
         return []
     if not isinstance(value, list):
-        raise ValueError(
+        raise ConfigError(
             f"profile {profile_name!r}: {field_name} must be a list of {kind} glob "
             f"strings (e.g. [{example!r}]), got {type(value).__name__}: {value!r}"
         )
     for item in value:
-        if not isinstance(item, str):
-            raise ValueError(
-                f"profile {profile_name!r}: {field_name} entries must be {kind} glob "
-                f"strings, got {type(item).__name__}: {item!r}"
-            )
+        _glob_string(
+            f"profile {profile_name!r}: {field_name} entries must be {kind} glob "
+            f"strings",
+            item,
+        )
     return list(value)
 
 
+def _mapping_from_raw(where: str, value: object) -> dict:
+    """Validate that a config block is a JSON object instead of assuming it is.
+
+    Every block below is read with ``.items()``, ``in``, or ``dict()``, so a
+    wrong-typed value would escape as ``TypeError``/``AttributeError`` rather
+    than ``ConfigError`` -- and the fail-open surfaces (guard, status line) only
+    recognize ``ConfigError`` as "I have stopped working", so anything else exits
+    in silence. Same shape-check-don't-coerce rule as ``_glob_list_from_raw``:
+    every value reaching here is checked, never coerced, so a block that may be
+    absent goes through ``_optional_mapping_from_raw`` rather than being turned
+    into ``{}`` by the caller before it gets here.
+    """
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{where} must be a JSON object, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
+def _optional_mapping_from_raw(where: str, value: object) -> dict:
+    """Read a block that defaults to empty when it is absent, shape-checked.
+
+    Absence is the only thing that means "empty": ``value is None`` (the key is
+    missing, or explicitly null) yields ``{}``, and everything else goes to
+    ``_mapping_from_raw`` and keeps its shape error. The ``or {}`` this replaces
+    coerced *before* the check, so a falsy wrong-typed block (``"profiles": []``,
+    ``"secret_naming": []``) was silently read as empty — zero profiles, or the
+    built-in secret-name templates back in force, deciding where secrets live
+    with no error anywhere. Same absent-is-None rule as ``_glob_list_from_raw``,
+    ``_object_list_from_raw``, and ``_service_from_raw``, so the answer no longer
+    depends on how deeply the block is nested. Present-but-empty (``{}``) still
+    parses exactly as absence does: an empty block asks for nothing, it is not a
+    truncated one.
+    """
+    if value is None:
+        return {}
+    return _mapping_from_raw(where, value)
+
+
+def _object_list_from_raw(where: str, value: object) -> list[dict]:
+    """Validate a config block that is a list of JSON objects. See above."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"{where} must be a list of JSON objects, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+    return [_mapping_from_raw(f"{where}[{i}]", item) for i, item in enumerate(value)]
+
+
+# What may stand on the left of `export NAME=...`. Deliberately ASCII-only and
+# stricter than `str.isidentifier()` (which accepts `café` and other non-ASCII
+# names): this describes what a shell will take, not what Python will.
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _env_map_from_raw(where: str, value: object) -> dict[str, str]:
+    """Validate a ``project_env`` entry's ``env`` map -- shape, keys AND values.
+
+    ``_optional_mapping_from_raw`` establishes only that the block is a JSON
+    object. Every pair inside it is then written into ``ambient.zsh`` verbatim as
+    ``export <key>=<value>`` (``mien.ambient._scope_block``), so both halves have
+    to be checked here, for the same reason the sibling ``match`` goes through
+    ``_glob_string`` rather than being trusted:
+
+    - A non-string VALUE dies in ``ambient._emit_value`` as a bare
+      ``AttributeError`` (``.replace`` on an int), which ``env_sync_cmd`` does
+      not catch and ``MienGroup`` does not translate: ``mien env sync`` exits 1
+      with a raw traceback on stderr rather than the actionable ``Error:`` line
+      every other config fault gets, and neither ``ambient.zsh`` nor
+      ``~/.zshenv`` is touched. An unquoted number (``{"PORT": 8080}``)
+      is a plausible hand-edit, and the packaged schema declares this field
+      ``dict[str, str]``.
+    - A KEY that is not a shell identifier survives every gate downstream.
+      ``zsh -n`` PARSES ``export 2FA="x"`` (it is a run-time error, not a syntax
+      one), so ``assert_parses`` passes and the file is written -- and then
+      sourcing it fails at that line with ``not an identifier`` and ABANDONS THE
+      REST OF THE FILE: every later export, including every other profile's
+      scopes, silently never happens. A key with a space is quieter still --
+      ``export MY VAR="x"`` is valid syntax that exports ``MY`` empty and
+      ``VAR="x"``, so the variable the operator wrote is never set. Neither says
+      a word anywhere, which is the wrong-account-in-silence ending this parser
+      exists to prevent.
+
+    A non-string key cannot come from JSON, whose keys are always strings, but
+    ``deserialize_config`` also accepts an already-parsed ``dict``; the
+    ``isinstance`` here is what keeps the check itself from dying on one.
+    """
+    env = _optional_mapping_from_raw(where, value)
+    for key, item in env.items():
+        if not isinstance(key, str) or not _ENV_NAME_RE.fullmatch(key):
+            raise ConfigError(
+                f"{where}: {key!r} is not a usable environment variable name. "
+                f"Expected letters, digits and underscores, not starting with a "
+                f"digit (e.g. 'AWS_PROFILE')."
+            )
+        if not isinstance(item, str):
+            raise ConfigError(
+                f"{where}: {key!r} must be a string, got "
+                f"{type(item).__name__}: {item!r}"
+            )
+    return dict(env)
+
+
+# The JSON types a leaf config value can be annotated with, and how a message
+# names each one. A field annotated with anything else -- a nested dataclass, a
+# service block -- is not a leaf and is built and validated by its own pass.
+_LEAF_TYPE_NAMES: dict[type, str] = {
+    str: "a string",
+    bool: "a boolean",
+    int: "an integer",
+    float: "a number",
+    list: "a list",
+    dict: "a JSON object",
+}
+
+
+def _leaf_spec(annotation: object) -> tuple[tuple[type, ...], str] | None:
+    """Read one field annotation as (accepted types, how to say them), or None.
+
+    None means "not a leaf": ``GoogleService | None`` names a block that
+    ``_service_from_raw`` already validates, not a value to type-check here.
+    ``str | None`` keeps accepting ``None`` because ``NoneType`` is one of its
+    arguments; a bare ``str`` does not, which is the whole distinction the
+    annotations already record.
+    """
+    origin = get_origin(annotation)
+    args = get_args(annotation) if origin in (Union, UnionType) else (annotation,)
+    types: list[type] = []
+    names: list[str] = []
+    nullable = False
+    for arg in args:
+        if arg is type(None):
+            nullable = True
+            continue
+        base = get_origin(arg) or arg  # dict[str, str] -> dict, list[str] -> list
+        if base not in _LEAF_TYPE_NAMES:
+            return None
+        types.append(base)
+        if _LEAF_TYPE_NAMES[base] not in names:
+            names.append(_LEAF_TYPE_NAMES[base])
+    if not types:
+        return None
+    if nullable:
+        types.append(type(None))
+        names.append("null")
+    return tuple(types), " or ".join(names)
+
+
+@lru_cache(maxsize=None)
+def _leaf_specs(cls: type, scalars_only: bool = False) -> dict[str, tuple[tuple[type, ...], str]]:
+    """The leaf fields of a dataclass and the type each one accepts.
+
+    Derived from the annotations rather than hand-listed, so a field added to a
+    dataclass below is checked from the moment it exists and the check cannot
+    drift from the declaration. ``from __future__ import annotations`` makes
+    every annotation a string, hence ``get_type_hints`` rather than
+    ``f.type``. Cached because the answer is a property of the class.
+
+    ``scalars_only`` drops the ``list``/``dict`` fields, for callers whose
+    container fields each have a dedicated validator with a more useful message
+    (``default_for`` says "a list of directory glob strings", not "a list").
+    """
+    hints = get_type_hints(cls)
+    specs = {}
+    for f in dc_fields(cls):
+        spec = _leaf_spec(hints[f.name])
+        if spec is None:
+            continue
+        if scalars_only and any(t in (list, dict) for t in spec[0]):
+            continue
+        specs[f.name] = spec
+    return specs
+
+
+def _check_leaf_values(
+    label: str, data: dict, cls: type, *, scalars_only: bool = False
+) -> None:
+    """Validate the field VALUES of one config block, not just its shape.
+
+    The shape checks above stop at the block: they establish that ``github`` is
+    an object and ``slack`` a list of objects, and then hand the leaves straight
+    to the dataclass, which takes whatever it is given. ``"git_email": 123`` or
+    ``"username": 42`` therefore parsed clean and died much later, wherever the
+    value was first used as text -- as ``AttributeError``/``TypeError``, which
+    the fail-open surfaces do not recognize as a config failure. The status line
+    rendered blank and ``mien guard`` exited 0 with nothing on either stream: a
+    commit under the wrong identity, waved through in silence. Same rule as
+    everywhere else here, applied one level deeper -- check, never coerce, and
+    fail as ``ConfigError`` so the surfaces can say they have stopped working.
+
+    Only keys that are present are checked; an absent one is the caller's
+    missing-key check or a dataclass default, both of which have their own say.
+    """
+    for name, (types, expected) in _leaf_specs(cls, scalars_only).items():
+        if name not in data:
+            continue
+        value = data[name]
+        # `isinstance(True, int)` is True, so a bool is only accepted where the
+        # annotation actually says bool.
+        if isinstance(value, types) and not (isinstance(value, bool) and bool not in types):
+            continue
+        raise ConfigError(
+            f"{label}: {name!r} must be {expected}, got "
+            f"{type(value).__name__}: {value!r}"
+        )
+
+
+class ConfigError(ValueError):
+    """The config file cannot be understood.
+
+    Distinct from a plain ValueError so the CLI can report it as an actionable
+    error instead of a traceback, and so the fail-open surfaces (status line,
+    guard) can say that they have stopped working rather than going quiet.
+    """
+
+
+def _reject_unknown_keys(
+    label: str,
+    data: dict,
+    known: Iterable[str],
+    *,
+    advertised: Iterable[str] | None = None,
+    tolerated: Iterable[str] = (),
+) -> None:
+    """Reject a key in one config block that mien does not recognize.
+
+    Every block gets the same treatment through this one function so the four
+    messages cannot drift apart: `label` names the block precisely (`config`,
+    `secret_naming`, `profile 'work'`, `profile 'work': project_env entry
+    '*/work'`, `profile 'work': aws`), and the message always names the offending
+    key and lists what is valid. `advertised` is the set the message suggests
+    when it differs from what is accepted -- an accepted alias should not be
+    recommended. `tolerated` is accepted silently and never advertised: keys an
+    older mien wrote that nothing reads any more.
+
+    Unrecognized means *rejected*, at every level, because every level has a way
+    to lose an identity in silence:
+
+    - top level: `"profles"` yields a config with zero profiles and no error, so
+      every identity vanishes and `mien which` resolves to nothing; `"bootstrp"`
+      empties the bootstrap account the GCP backend reports in its "you are
+      logged in as someone else" diagnostics.
+    - `secret_naming`: a typo'd template key falls back to the built-in
+      template, which changes *where secrets live* -- `mien login` writes under
+      the built-in name while the operator believes the config's name is in
+      force, and secrets already stored under the intended name become
+      unreachable.
+    - profile: `defualt_for` simply drops the directory claim, and the directory
+      then falls to some other profile's catch-all glob.
+    - `project_env` entry: `{"match": "*/work", "envs": {...}}` builds a scope
+      with an empty `env`, so the scope matches and exports nothing -- no
+      `AWS_PROFILE`, the tool falls back to its own default account, and the
+      command succeeds as somebody else.
+    - service block: a dropped `profile`/`ssh_key_path` leaves the service
+      unconfigured, with the same wrong-account ending.
+
+    Nothing warns in any of those cases, and the fail-open surfaces (`guard`,
+    `statusline`, `prompt`) stay silent too, so all of them fail loudly instead.
+    """
+    known = set(known)
+    tolerated = set(tolerated)
+    valid = ", ".join(sorted(known if advertised is None else set(advertised)))
+    for k in data:
+        if k in known or k in tolerated:
+            continue
+        raise ConfigError(f"{label}: unknown key {k!r}. Valid keys are: {valid}.")
+
+
+# Profile-level keys an older config may still carry. Tolerated by name alone,
+# whatever value they hold: `git_name` was never read by any code path, so a
+# config that set it to a real name was already getting nothing from it, and
+# rejecting such a config now would break configs that worked. Still an explicit
+# list rather than "drop anything unrecognized" — see `_reject_unknown_keys` for
+# why an unknown profile key must fail loudly.
+_RETIRED_PROFILE_KEYS: frozenset[str] = frozenset({"git_name"})
+
+
+# Top-level keys mien reads. `$schema_version` is the spelling `_config_to_dict`
+# writes; `schema_version` is the older, unprefixed one `deserialize_config`
+# still accepts, so it has to be accepted here too — rejecting it would make a
+# config that loads today fail to load.
+_TOP_LEVEL_KEYS: frozenset[str] = frozenset({
+    "$schema_version",
+    "schema_version",
+    "secrets_backend",
+    "bootstrap",
+    "secret_naming",
+    "profiles",
+})
+
+# What the error message advertises: the alias is accepted but not suggested.
+_TOP_LEVEL_KEYS_ADVERTISED: frozenset[str] = _TOP_LEVEL_KEYS - {"schema_version"}
+
+
+@dataclass(frozen=True)
+class _RetiredKey:
+    """A service key an older mien wrote, and what deleting it costs today.
+
+    `no_op_value` is the value the key had to hold for its removal to change
+    nothing. `remedy` is the part the caller cannot guess: a retirement that
+    removed a *capability* makes "just delete the key" a behaviour change, so
+    each key has to spell out what deleting it does and how to get the old
+    behaviour back. "Remove it from your config" is only honest advice when the
+    key really was inert.
+    """
+
+    no_op_value: object
+    remedy: str
+
+
+# Keys a service block may still carry from an older mien. Deliberately an
+# explicit map rather than "drop anything unrecognized": an unknown key is far
+# more likely a typo (`profil`, `ssh_keypath`) than a retired field, and silently
+# dropping it would leave the service unconfigured — no
+# `AWS_PROFILE`/`OCI_CLI_PROFILE` exported, the tool falling back to its own
+# default account, and the command succeeding as somebody else. A misconfigured
+# identity has to fail loudly.
+_RETIRED_SERVICE_KEYS: dict[type, dict[str, _RetiredKey]] = {
+    GoogleService: {
+        "gcloud_login_required": _RetiredKey(
+            no_op_value=False,
+            remedy=(
+                "The ADC suppression it controlled has been removed from mien: "
+                "nothing reads\n"
+                "this key any more, and there is no other setting you might have "
+                "meant.\n\n"
+                "Deleting the key is therefore not a no-op. mien would start "
+                "writing an\n"
+                "ephemeral ADC file for this profile and exporting "
+                "GOOGLE_APPLICATION_CREDENTIALS\n"
+                "— the export this profile asked it not to make.\n\n"
+                "To move forward:\n"
+                "  - If that export is fine, delete 'gcloud_login_required' and "
+                "nothing else\n"
+                "    changes.\n"
+                "  - To keep this profile ADC-free, delete 'gcloud_login_required' "
+                "AND set this\n"
+                "    google block's 'oauth_client_secret_ref' to null. mien writes "
+                "an ADC only\n"
+                "    when both 'oauth_client_secret_ref' and 'refresh_token_ref' "
+                "are set, so\n"
+                "    clearing it leaves the gcloud-login-only google that "
+                "'gcloud_login_required:\n"
+                "    true' described. `gcloud` still runs under this profile's "
+                "config; what\n"
+                "    stops working is `mien token google` and `mien whoami "
+                "--live`'s google\n"
+                "    probe, neither of which works for a gcloud-login-only profile "
+                "anyway.\n\n"
+                "    Nulling the ref also strands the secret it named. `mien logout "
+                "--service\n"
+                "    google` deletes that secret only when "
+                "'oauth_client_secret_ref' is set, and\n"
+                "    it drops the whole google block as it goes — so once the ref "
+                "is null the\n"
+                "    stored OAuth client secret stays in the backend with nothing "
+                "left pointing\n"
+                "    at it. Write the ref's current value down and delete that "
+                "secret from your\n"
+                "    backend yourself before you null the key, or accept the orphan "
+                "and clean it\n"
+                "    up later."
+            ),
+        ),
+    },
+    SlackWorkspace: {
+        "team_id": _RetiredKey(
+            no_op_value=None,
+            remedy=(
+                "Nothing has ever read it — mien addresses a workspace by its "
+                "'workspace' label —\n"
+                "so deleting the key changes nothing. mien only ever wrote it as "
+                "null, so a real\n"
+                "team id here was typed by hand: check it was not meant to be a "
+                "different key\n"
+                "(valid keys: workspace, user_token_ref) before you delete it."
+            ),
+        ),
+    },
+}
+
+
+def _service_from_dict(cls, data: dict, label: str):
+    """Build a service dataclass, tolerating only known-retired keys.
+
+    A retired key is dropped when it holds the value that made it a no-op. Any
+    other value meant something once, so it is reported rather than ignored —
+    silently discarding it would change behaviour without saying so. The report
+    carries that key's own remedy, because for a key whose capability was removed
+    the obvious fix (delete it) *is* the silent behaviour change this raise
+    exists to prevent.
+
+    `label` is the caller's own name for this block (`profile 'work': aws`,
+    `profile 'work': slack[1]`) and prefixes every message here, so a bad key
+    inside a service block reads like every other config error and names the
+    profile to go and edit. The dataclass name alone does not: with several
+    profiles carrying an `aws` block, `AWSService: ...` leaves the reader to
+    guess which one.
+    """
+    retired = _RETIRED_SERVICE_KEYS.get(cls, {})
+    cleaned = {}
+    for k, v in data.items():
+        if k in retired:
+            if v != retired[k].no_op_value:
+                raise ConfigError(
+                    f"{label}: {k!r}={v!r} is no longer supported "
+                    f"(only {retired[k].no_op_value!r} was ever written).\n\n"
+                    f"{retired[k].remedy}"
+                )
+            continue
+        cleaned[k] = v
+    fields = dc_fields(cls)
+    _reject_unknown_keys(label, cleaned, {f.name for f in fields})
+    # A missing required field is the same class of error as an unknown one: the
+    # block is present, so it was meant to configure something, and half a block
+    # configures the wrong identity just as quietly as a typo'd key does. Named
+    # here rather than left to `cls(**cleaned)`, whose TypeError talks about
+    # positional arguments the config file does not have.
+    missing = [
+        f.name for f in fields
+        if f.name not in cleaned
+        and f.default is MISSING and f.default_factory is MISSING
+    ]
+    if missing:
+        raise ConfigError(
+            f"{label}: missing required key{'s' if len(missing) > 1 else ''} "
+            f"{', '.join(repr(m) for m in missing)}. Valid keys are: "
+            f"{', '.join(sorted(f.name for f in fields))}."
+        )
+    _check_leaf_values(label, cleaned, cls)
+    try:
+        return cls(**cleaned)
+    except TypeError as exc:
+        # Unreachable while the checks above cover every way `cls(**cleaned)` can
+        # reject its arguments; kept as the backstop that holds the module's one
+        # invariant if a future dataclass grows a new one. Nothing may leave here
+        # as a bare TypeError: the fail-open surfaces recognize only ConfigError
+        # as "I have stopped working" and would exit in silence on anything else.
+        raise ConfigError(
+            f"{label}: {exc}. Valid keys are: "
+            f"{', '.join(sorted(f.name for f in fields))}."
+        ) from exc
+
+
+def _service_from_raw(cls, profile_name: str, key: str, p: dict):
+    """Build an optional service block, checking its shape first.
+
+    Absent-or-null means "this profile has no such service"; anything else is a
+    block to validate. Present-but-empty is *not* absent: `"google": {}` is a
+    truncated block, and short-circuiting on falsiness dropped the service
+    without a word — the profile then acts with no google at all, which is the
+    silent identity loss this parser exists to prevent. `{}` now goes through the
+    normal checks, so a service whose fields are all optional (`aws`, `oci`)
+    still parses and one with required fields reports what is missing. A
+    present-but-wrong-typed block (`"github": false`, `"aws": []`) reaches
+    `_mapping_from_raw` and keeps its shape error, which falsiness also used to
+    swallow.
+    """
+    value = p.get(key)
+    if value is None:
+        return None
+    label = f"profile {profile_name!r}: {key}"
+    return _service_from_dict(cls, _mapping_from_raw(label, value), label)
+
+
 def _config_from_dict(raw: dict) -> Config:
-    sb_raw = dict(raw.get("secrets_backend", {}))
+    sb_raw = dict(
+        _optional_mapping_from_raw("secrets_backend", raw.get("secrets_backend")))
+    if "type" not in sb_raw:
+        raise ConfigError(
+            "secrets_backend.type is missing — mien cannot tell where your "
+            "secrets live. Expected one of: gcp_secret_manager, macos_keychain, "
+            "keyring.")
+    # `type` was the one leaf that never reached `_check_leaf_values`: popped out
+    # of the block and handed straight to `BackendConfig`, whatever it held. A
+    # non-string one then escaped `ensure_known_backend_options`'s
+    # `BACKEND_OPTIONS.get(cfg.type)` as a bare `TypeError: unhashable type:
+    # 'list'` — out of `deserialize_config`, which every surface calls, so `mien
+    # guard` exited 0 with both streams empty and waved through the very
+    # mis-identity commit it exists to block. Checked here, against the same
+    # annotation as every other leaf, so the answer cannot drift from
+    # `BackendConfig.type: str`, and so nothing downstream ever sees a `type` that
+    # is not a string. `scalars_only` skips `options`, which is this block's
+    # remaining keys rather than a key of its own.
+    #
+    # This is the TYPE check only. A `type` that is a string but not a backend
+    # mien has (`"keychain"`, the retired `"oci_vault"`) still belongs to
+    # `ensure_known_backend`, which has the migration story and is deliberately
+    # deferred to the first command that reaches for the backend. `null` and `5`
+    # are rejected here with the other wrong types rather than left to that
+    # check: they are not backend names, so "unknown secrets backend 5" would
+    # send the reader looking for a backend called 5 instead of telling them the
+    # value is the wrong shape — and splitting them off would make the
+    # user-visible contract depend on whether a value happens to be hashable.
+    _check_leaf_values("secrets_backend", sb_raw, BackendConfig, scalars_only=True)
     sb_type = sb_raw.pop("type")
     secrets_backend = BackendConfig(type=sb_type, options=sb_raw)
+    # Imported here, not at module scope: `mien.backends` imports this module, so
+    # a top-level import would be a cycle. By parse time it is already loadable,
+    # and the module is cheap — every concrete backend inside it is lazy.
+    from mien.backends import ensure_known_backend_options
+    ensure_known_backend_options(secrets_backend)
 
-    sn = raw.get("secret_naming") or {}
+    sn = _optional_mapping_from_raw("secret_naming", raw.get("secret_naming"))
+    _reject_unknown_keys("secret_naming", sn, {f.name for f in dc_fields(SecretNaming)})
+    # A template is `.format(...)`ed to decide where a secret lives, so a
+    # non-string one dies as an AttributeError deep inside `mien login`/`token`
+    # rather than here. `null` counts: `sn.get(key, default)` returns the null,
+    # not the built-in template.
+    _check_leaf_values("secret_naming", sn, SecretNaming)
     secret_naming = SecretNaming(
         default=sn.get("default", "mien-{profile}-{service}-{kind}"),
         slack_token=sn.get("slack_token", "mien-{profile}-slack-{workspace}-token"),
     )
 
     profiles: dict[str, Profile] = {}
-    for name, p in (raw.get("profiles") or {}).items():
-        google = GoogleService(**p["google"]) if p.get("google") else None
-        github = GitHubService(**p["github"]) if p.get("github") else None
-        slack = [SlackWorkspace(**w) for w in (p.get("slack") or [])]
-        aws = AWSService(**p["aws"]) if p.get("aws") else None
-        oci = OCIService(**p["oci"]) if p.get("oci") else None
-        atlassian = AtlassianService(**p["atlassian"]) if p.get("atlassian") else None
-        notion = NotionService(**p["notion"]) if p.get("notion") else None
-        project_env = [
-            ProjectEnvScope(match=s["match"], env=dict(s.get("env") or {}))
-            for s in (p.get("project_env") or [])
+    for name, p in _optional_mapping_from_raw("profiles", raw.get("profiles")).items():
+        p = _mapping_from_raw(f"profile {name!r}", p)
+        _reject_unknown_keys(
+            f"profile {name!r}", p,
+            {f.name for f in dc_fields(Profile)} - {"name"},
+            tolerated=_RETIRED_PROFILE_KEYS,
+        )
+        # The profile's own scalar leaves, `git_email` today. Its list fields are
+        # skipped here because each already has a validator that says more than
+        # "a list" (`_glob_list_from_raw`, `_object_list_from_raw`); a new scalar
+        # profile field is covered the moment it is declared.
+        _check_leaf_values(f"profile {name!r}", p, Profile, scalars_only=True)
+        google = _service_from_raw(GoogleService, name, "google", p)
+        github = _service_from_raw(GitHubService, name, "github", p)
+        slack = [
+            _service_from_dict(SlackWorkspace, w, f"profile {name!r}: slack[{i}]")
+            for i, w in enumerate(
+                _object_list_from_raw(f"profile {name!r}: slack", p.get("slack")))
         ]
+        aws = _service_from_raw(AWSService, name, "aws", p)
+        oci = _service_from_raw(OCIService, name, "oci", p)
+        atlassian = _service_from_raw(AtlassianService, name, "atlassian", p)
+        notion = _service_from_raw(NotionService, name, "notion", p)
+        project_env = []
+        for s_ in _object_list_from_raw(f"profile {name!r}: project_env", p.get("project_env")):
+            if "match" not in s_:
+                raise ConfigError(
+                    f"profile {name!r}: a project_env entry has no 'match' glob: {s_!r}")
+            # Checked before the label below is built from it, and before it
+            # reaches `match_base`/`_VAR_RE` in `mien env sync` — a non-string
+            # dies there as a bare AttributeError/TypeError that `env_sync_cmd`
+            # does not catch. An empty glob is rejected for the opposite reason:
+            # `match_base("")` is `""`, so the emitted `case "$PWD/" in /*)`
+            # fires in every directory and the scope's env is exported
+            # everywhere. Same silent widening as the `"*"` element that
+            # `_glob_list_from_raw` exists to stop.
+            match = _glob_string(
+                f"profile {name!r}: project_env entry {s_!r}: 'match' must be a "
+                f"directory glob string (e.g. '*/Projects/acme')",
+                s_["match"],
+            )
+            if not match:
+                raise ConfigError(
+                    f"profile {name!r}: project_env entry {s_!r} has an empty "
+                    f"'match' glob. An empty glob covers every directory, so this "
+                    f"scope's env would be exported everywhere. Write the directory "
+                    f"it applies to, e.g. '*/Projects/acme'."
+                )
+            _reject_unknown_keys(
+                f"profile {name!r}: project_env entry {match!r}", s_,
+                {f.name for f in dc_fields(ProjectEnvScope)},
+            )
+            project_env.append(ProjectEnvScope(
+                match=match,
+                env=_env_map_from_raw(
+                    f"profile {name!r}: project_env {match!r} env",
+                    s_.get("env")),
+            ))
         profiles[name] = Profile(
             name=name,
             google=google,
@@ -251,13 +889,12 @@ def _config_from_dict(raw: dict) -> Config:
             owns_remotes=_glob_list_from_raw(
                 name, "owns_remotes", "remote", p.get("owns_remotes"), "github.com/acme/*"),
             git_email=p.get("git_email"),
-            git_name=p.get("git_name"),
         )
 
     return Config(
         schema_version=SCHEMA_VERSION,
         secrets_backend=secrets_backend,
-        bootstrap=raw.get("bootstrap") or {},
+        bootstrap=_optional_mapping_from_raw("bootstrap", raw.get("bootstrap")),
         secret_naming=secret_naming,
         profiles=profiles,
     )

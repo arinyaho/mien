@@ -3,6 +3,7 @@ import pytest
 from mien.config import BackendConfig, Config, GitHubService, Profile, SecretNaming
 from mien.manifest import (
     MANIFEST_SECRET_NAME,
+    ManifestError,
     is_cloud_backend,
     pull_manifest,
     push_manifest,
@@ -46,8 +47,8 @@ def _cfg(type_="gcp_secret_manager") -> Config:
 
 def test_is_cloud_backend():
     assert is_cloud_backend(BackendConfig(type="gcp_secret_manager", options={}))
-    assert is_cloud_backend(BackendConfig(type="oci_vault", options={}))
     assert not is_cloud_backend(BackendConfig(type="macos_keychain", options={}))
+    assert not is_cloud_backend(BackendConfig(type="keyring", options={}))
 
 
 def test_push_then_pull_roundtrips():
@@ -66,7 +67,7 @@ def test_pull_returns_none_when_absent():
 def test_pull_raises_on_bad_schema_version():
     b = FakeBackend()
     b.store[MANIFEST_SECRET_NAME] = b'{"$schema_version": 99, "secrets_backend": {"type": "macos_keychain"}, "bootstrap": {}, "secret_naming": {}, "profiles": {}}'
-    with pytest.raises(ValueError, match="schema_version"):
+    with pytest.raises(ManifestError, match="schema_version"):
         pull_manifest(b)
 
 

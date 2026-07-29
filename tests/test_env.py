@@ -44,7 +44,6 @@ def test_google_synthesizes_adc_from_refresh_token(monkeypatch, tmp_path, fake_b
             adc_ref=None,
             gcloud_config_name="personal",
             default_project="myproj",
-            gcloud_login_required=False,
         ),
     )
     bundle = build_env(prof, fake_backend, pid=111)
@@ -67,7 +66,7 @@ def test_google_synthesizes_adc_from_refresh_token(monkeypatch, tmp_path, fake_b
     assert fake_backend.get.call_count == 2  # refresh_token_ref + oauth_client_secret_ref
 
 
-def test_skips_adc_when_login_required(monkeypatch, tmp_path, fake_backend):
+def test_skips_adc_without_an_oauth_client_secret(monkeypatch, tmp_path, fake_backend):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     prof = Profile(
         name="work",
@@ -79,7 +78,6 @@ def test_skips_adc_when_login_required(monkeypatch, tmp_path, fake_backend):
             adc_ref=None,
             gcloud_config_name="work",
             default_project="hp",
-            gcloud_login_required=True,
         ),
     )
     bundle = build_env(prof, fake_backend, pid=222)
@@ -135,8 +133,8 @@ def test_slack_writes_workspace_map(monkeypatch, tmp_path, fake_backend):
     prof = Profile(
         name="p",
         slack=[
-            SlackWorkspace(workspace="team-a", team_id=None, user_token_ref="slack-team-a-ref"),
-            SlackWorkspace(workspace="team-b", team_id="T2", user_token_ref="slack-team-b-ref"),
+            SlackWorkspace(workspace="team-a", user_token_ref="slack-team-a-ref"),
+            SlackWorkspace(workspace="team-b", user_token_ref="slack-team-b-ref"),
         ],
     )
     bundle = build_env(prof, fake_backend, pid=444)
@@ -146,7 +144,7 @@ def test_slack_writes_workspace_map(monkeypatch, tmp_path, fake_backend):
     assert (p.stat().st_mode & 0o777) == 0o600
     prof2 = Profile(
         name="solo",
-        slack=[SlackWorkspace(workspace="team-a", team_id=None, user_token_ref="slack-team-a-ref")],
+        slack=[SlackWorkspace(workspace="team-a", user_token_ref="slack-team-a-ref")],
     )
     b2 = build_env(prof2, fake_backend, pid=555)
     assert b2.env["MIEN_SLACK_DEFAULT_TOKEN"] == "xoxp-aaa"

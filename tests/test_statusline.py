@@ -1,5 +1,8 @@
 import json
+import os
+import re
 
+import pytest
 from click.testing import CliRunner
 
 from mien.cli import main
@@ -196,6 +199,24 @@ def test_statusline_is_silent_without_a_config(tmp_path, monkeypatch):
     assert result.output.strip() == ""
 
 
+def test_statusline_says_so_on_an_unreadable_config(tmp_path, monkeypatch):
+    # A config that exists but does not parse is not "nothing to report" — mien
+    # can no longer tell who you are here, and the status line must say so. It
+    # has to land on stdout: that is the stream Claude Code renders.
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{ not json")
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+    monkeypatch.delenv("MIEN_PROFILE", raising=False)
+    result = CliRunner().invoke(
+        main, ["statusline"],
+        input=json.dumps({"workspace": {"current_dir": "/w/acme/repo"}}),
+    )
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout
+    assert result.stderr.strip() == ""
+    assert result.stdout.count("\n") == 1  # one status-line row, not a report
+
+
 def test_statusline_flags_a_stale_active_profile(tmp_path, monkeypatch):
     _write_cfg(tmp_path, monkeypatch, work=["*/acme/*"])
     result = _run("/w/acme/repo", monkeypatch, mien_profile="deleted-profile")
@@ -245,12 +266,12 @@ def test_statusline_flags_a_wrong_git_author(tmp_path, monkeypatch):
                             email="me@acme.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="work",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
         "personal": Profile(name="personal", google=GoogleService(
                             email="me@personal.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="personal",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
     })
     result = _run("/flat/api", monkeypatch,
                   remote="https://github.com/acme-core/api.git",
@@ -268,7 +289,7 @@ def test_statusline_is_calm_when_the_git_author_matches(tmp_path, monkeypatch):
                             email="me@acme.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="work",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
     })
     result = _run("/flat/api", monkeypatch,
                   remote="https://github.com/acme-core/api.git",
@@ -301,6 +322,48 @@ def _run_guard(cwd, monkeypatch, mien_profile=None, remote=None, author_email=No
     monkeypatch.setattr("mien.cli.git_author_email", lambda _cwd: author_email)
     args = ["guard", "--force"] if force else ["guard"]
     return CliRunner().invoke(main, args)
+
+
+def _write_broken_cfg(tmp_path, monkeypatch):
+    """A config that exists but does not parse — the fail-open surfaces' hard case.
+
+    Not "mien is unconfigured" (that is a missing file, and silence is right):
+    the file is there and mien can no longer read who you are from it.
+    """
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{ not json")
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+
+
+def _write_cfg_with_a_non_string_backend_type(tmp_path, monkeypatch):
+    """Valid JSON, well-formed everywhere except `secrets_backend.type`.
+
+    The quietest shape of "unreadable": the file parses as JSON and every
+    identity in it is spelled correctly, so the operator has no reason to
+    suspect anything. `type` alone is the wrong type, and it used to be the one
+    leaf handed to `BackendConfig` unchecked — the resulting `TypeError` came
+    out of `deserialize_config`, which is not `ConfigError`, so guard neither
+    enforced nor announced.
+
+    The profiles are the same ones as `test_guard_blocks_a_wrong_active_identity`
+    so the two tests differ in exactly one key: with a string `type` this config
+    makes guard refuse, which is what the announcement is standing in for.
+    """
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({
+        "$schema_version": 1,
+        "secrets_backend": {"type": ["macos_keychain"]},
+        "bootstrap": {},
+        "secret_naming": {"default": "d", "slack_token": "s"},
+        "profiles": {
+            "work": {"owns_remotes": ["github.com/acme-*/*"]},
+            "personal": {"owns_remotes": ["github.com/me/*"]},
+        },
+    }))
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _run_prompt(cwd, monkeypatch, mien_profile=None, remote=None, author_email=None):
@@ -340,6 +403,91 @@ def test_prompt_is_silent_without_a_config(tmp_path, monkeypatch):
     assert result.exit_code == 0 and result.output == ""
 
 
+def test_prompt_says_so_on_an_unreadable_config(tmp_path, monkeypatch):
+    # A blank prompt segment reads as "nothing to report", when in fact mien can
+    # no longer tell who you are here — so it shows a marker instead of nothing.
+    _write_broken_cfg(tmp_path, monkeypatch)
+    result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0  # a prompt command must never fail the shell
+    assert "mien:config" in result.stdout
+
+
+def test_prompt_puts_the_config_marker_on_stdout_not_stderr(tmp_path, monkeypatch):
+    # Deliberate, and easy for a later refactor to flip: a prompt redraws
+    # constantly and its stderr goes straight to the terminal, so a message
+    # there would spam every redraw. The marker rides in the segment instead.
+    _write_broken_cfg(tmp_path, monkeypatch)
+    result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert "mien:config" in result.stdout
+    assert result.stderr == ""
+
+
+def test_prompt_config_marker_stays_compact(tmp_path, monkeypatch):
+    # It has to sit inside a prompt line: no newline (same as a healthy
+    # segment), and no parse detail — `mien doctor` is where that belongs.
+    _write_broken_cfg(tmp_path, monkeypatch)
+    result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert "\n" not in result.stdout
+    assert "invalid config JSON" not in result.stdout
+    assert str(tmp_path) not in result.stdout
+    assert len(_ANSI.sub("", result.stdout)) <= 32
+
+
+def test_guard_fails_open_on_an_unreadable_config_and_says_it_is_not_enforcing(
+        tmp_path, monkeypatch):
+    # These are the exact inputs that make guard refuse when the config parses
+    # (see test_guard_blocks_a_wrong_active_identity), so this pins both halves
+    # at once: it no longer blocks — a broken config must not wedge a commit —
+    # and it says why, because a guard that silently stopped guarding is worse
+    # than one that admits it. Neither half may regress alone.
+    _write_broken_cfg(tmp_path, monkeypatch)
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "refusing" not in result.output
+    assert "NOT enforcing" in result.stderr
+    assert "config unreadable" in result.stderr
+    # A pre-commit hook's stdout is not a place to narrate; the warning is a
+    # diagnostic, so it goes to stderr and nowhere else.
+    assert result.stdout == ""
+
+
+def test_guard_announces_rather_than_going_quiet_on_a_non_string_backend_type(
+        tmp_path, monkeypatch):
+    """The consequence, not the exception type: guard may not fall silent here.
+
+    These are the inputs of `test_guard_blocks_a_wrong_active_identity` — the
+    config even names the same two profiles — with `secrets_backend.type` alone
+    changed from a string to a list. That made `deserialize_config` raise a bare
+    `TypeError`, which the fail-open surfaces do not recognize as a config
+    failure, so guard exited 0 with both streams empty: a pre-commit hook waving
+    through the exact mis-identity commit it is installed to block, saying
+    nothing. Either outcome is acceptable — refuse, or fail open and admit it —
+    but not silence.
+    """
+    _write_cfg_with_a_non_string_backend_type(tmp_path, monkeypatch)
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "NOT enforcing" in result.stderr
+    assert "config unreadable" in result.stderr
+    assert result.stdout == ""
+
+
+def test_statusline_says_so_on_a_non_string_backend_type(tmp_path, monkeypatch):
+    # Same config, the other always-on surface: a blank segment would read as
+    # "nothing to report" when mien can no longer tell who you are here.
+    _write_cfg_with_a_non_string_backend_type(tmp_path, monkeypatch)
+    result = _run("/flat/api", monkeypatch,
+                  remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout
+    assert "🟢" not in result.stdout
+
+
 def test_guard_blocks_a_wrong_active_identity(tmp_path, monkeypatch):
     _write_cfg_remotes(tmp_path, monkeypatch,
                        work=["github.com/acme-*/*"], personal=["github.com/me/*"])
@@ -357,12 +505,12 @@ def test_guard_blocks_a_wrong_commit_author_with_nothing_active(tmp_path, monkey
                             email="me@acme.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="work",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
         "personal": Profile(name="personal", google=GoogleService(
                             email="me@personal.example", oauth_client_id="c",
                             oauth_client_secret_ref=None, refresh_token_ref=None,
                             adc_ref=None, gcloud_config_name="personal",
-                            default_project=None, gcloud_login_required=True)),
+                            default_project=None)),
     })
     result = _run_guard("/flat/api", monkeypatch,
                         remote="https://github.com/acme-core/api.git",
@@ -407,6 +555,125 @@ def test_guard_allows_when_mien_is_unconfigured(tmp_path, monkeypatch):
     result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
                         remote="https://github.com/acme-core/api.git")
     assert result.exit_code == 0
+
+
+def _write_unopenable_cfg(tmp_path, monkeypatch):
+    """A config that is present and perfectly valid, but cannot be OPENED.
+
+    The other half of "unreadable": `_write_broken_cfg` is a file mien can read
+    and not parse; this is one mien cannot read at all — mode 0600 owned by
+    another user on a shared machine, or a config written under `sudo`. Both
+    leave mien unable to say who you are, so both have to be announced instead
+    of being swallowed by a catch-all.
+
+    The config underneath is deliberately a *working* one that renders a healthy
+    green segment, so if the file ever becomes readable again these tests fail
+    rather than passing for the wrong reason.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file regardless")
+    _write_cfg_remotes(tmp_path, monkeypatch, work=["github.com/acme-*/*"])
+    (tmp_path / "config.json").chmod(0o000)
+
+
+def _point_cfg_at_a_directory(tmp_path, monkeypatch):
+    """MIEN_CONFIG pointing at a directory — an OSError that is not permissions.
+
+    Pins that "present but unreadable" is the I/O *class* being announced, not
+    PermissionError specifically.
+    """
+    d = tmp_path / "config.json"
+    d.mkdir()
+    monkeypatch.setenv("MIEN_CONFIG", str(d))
+
+
+def test_statusline_says_so_on_a_config_it_cannot_open(tmp_path, monkeypatch):
+    _write_unopenable_cfg(tmp_path, monkeypatch)
+    result = _run("/flat/api", monkeypatch,
+                  remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout      # not a blank, silent segment
+    assert "🟢" not in result.stdout           # and not a healthy one either
+    assert result.stderr.strip() == ""
+    assert result.stdout.count("\n") == 1
+
+
+def test_statusline_says_so_when_the_config_path_is_a_directory(tmp_path, monkeypatch):
+    _point_cfg_at_a_directory(tmp_path, monkeypatch)
+    result = _run("/flat/api", monkeypatch,
+                  remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout
+
+
+def test_statusline_says_so_on_a_dangling_config_symlink(tmp_path, monkeypatch):
+    # ENOENT, like an absent config — but a symlink is something the operator
+    # put there on purpose, so this is a config whose target went missing, not
+    # an unconfigured machine. It must be announced, not passed off as silence.
+    link = tmp_path / "config.json"
+    link.symlink_to(tmp_path / "gone.json")
+    monkeypatch.setenv("MIEN_CONFIG", str(link))
+    result = _run("/flat/api", monkeypatch,
+                  remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout
+
+
+def test_prompt_says_so_on_a_config_it_cannot_open(tmp_path, monkeypatch):
+    _write_unopenable_cfg(tmp_path, monkeypatch)
+    result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0  # a prompt command must never fail the shell
+    assert "mien:config" in result.stdout
+    assert "🟢" not in result.stdout
+    assert result.stderr == ""    # a prompt redraws constantly; stderr would spam
+    assert "\n" not in result.stdout
+
+
+def test_guard_fails_open_on_a_config_it_cannot_open_and_says_it_is_not_enforcing(
+        tmp_path, monkeypatch):
+    # The same pair of guarantees as the unparseable-config case, for a config
+    # mien cannot open: it must not wedge the commit, and it must not stop
+    # guarding in silence.
+    _write_unopenable_cfg(tmp_path, monkeypatch)
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "refusing" not in result.output
+    assert "NOT enforcing" in result.stderr
+    assert "config unreadable" in result.stderr
+    assert result.stdout == ""
+
+
+def test_guard_fails_open_when_the_config_path_is_a_directory(tmp_path, monkeypatch):
+    _point_cfg_at_a_directory(tmp_path, monkeypatch)
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "NOT enforcing" in result.stderr
+
+
+def test_an_absent_config_stays_silent_everywhere(tmp_path, monkeypatch):
+    # The regression the announcement must not cost: no config at all means mien
+    # is simply not set up here, which is not a failure. All three surfaces stay
+    # quiet — none of them may start reporting "unreadable" for a machine that
+    # never configured mien.
+    missing = tmp_path / "does-not-exist.json"
+    monkeypatch.setenv("MIEN_CONFIG", str(missing))
+
+    line = _run("/flat/api", monkeypatch,
+                remote="https://github.com/acme-core/api.git")
+    assert line.exit_code == 0
+    assert line.output.strip() == ""
+
+    prompt = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert prompt.exit_code == 0 and prompt.output == ""
+
+    guard = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                       remote="https://github.com/acme-core/api.git")
+    assert guard.exit_code == 0
+    assert guard.output == "" and guard.stderr == ""
 
 
 def test_statusline_remote_owner_beats_a_directory_scope(tmp_path, monkeypatch):

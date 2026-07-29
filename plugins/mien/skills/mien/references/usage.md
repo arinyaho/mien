@@ -133,7 +133,7 @@ PAT" — is routine. Every `mien login` secret is read without ever touching `ar
 shell history, or `ps`: interactively through a hidden `getpass` prompt, or from
 stdin / a helper command. Every backend then stores it without argv exposure too —
 `macos_keychain` and `keyring` through in-process Keychain / Secret Service
-bindings, `gcp_secret_manager` and `oci_vault` over their APIs. Pick the recipe
+bindings, `gcp_secret_manager` over its API. Pick the recipe
 that matches where the secret already lives.
 
 ### From a file on disk
@@ -207,10 +207,6 @@ mien init --backend gcp_secret_manager --project <sm-project> \
 mien-use <profile>
 ```
 
-The commands above are the **GCP Secret Manager** flow; an `oci_vault` backend
-uses the same `mien init` import prompt but a different bootstrap (an OCI API key
-in `~/.oci/config`, no ADC / quota-project step).
-
 `mien init --no-import` skips the import prompt. `mien init --yes` auto-imports
 without asking. A non-interactive run *without* `--yes` does **not** auto-import:
 the confirmation prompt aborts, and because `init` has already written a fresh
@@ -218,5 +214,4 @@ empty config by that point, you are left with no profiles. Pass `--yes` or
 `--no-import` explicitly when running `init` from a script or an agent — and note
 that `--yes` means trusting whatever the backend manifest contains. Later, re-pull with `mien sync` (`--dry-run` to preview) or force-upload
 local state with `mien push`. `mien sync` and `mien push` require a cloud backend
-(`gcp_secret_manager` / `oci_vault`); they are a no-op or error on
-`macos_keychain`.
+(`gcp_secret_manager`); they are a no-op or error on `macos_keychain`.

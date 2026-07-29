@@ -143,6 +143,10 @@ def deserialize_config(raw: str | dict) -> Config:
     if version != SCHEMA_VERSION:
         raise ConfigError(
             f"Unsupported schema_version {version!r}; expected {SCHEMA_VERSION}")
+    # After the version check, not before: a config from a future schema should
+    # be told its version is unsupported, rather than blamed for a key that
+    # version legitimately added.
+    _check_top_level_keys(data)
     return _config_from_dict(data)
 
 
@@ -270,6 +274,60 @@ def _check_profile_keys(name: str, p: dict) -> None:
             continue
         raise ConfigError(
             f"profile {name!r}: unknown key {k!r}. Valid keys are: "
+            f"{', '.join(sorted(known))}."
+        )
+
+
+# Top-level keys mien reads. `$schema_version` is the spelling `_config_to_dict`
+# writes; `schema_version` is the older, unprefixed one `deserialize_config`
+# still accepts, so it has to be accepted here too — rejecting it would make a
+# config that loads today fail to load.
+_TOP_LEVEL_KEYS: frozenset[str] = frozenset({
+    "$schema_version",
+    "schema_version",
+    "secrets_backend",
+    "bootstrap",
+    "secret_naming",
+    "profiles",
+})
+
+# What the error message advertises: the alias is accepted but not suggested.
+_TOP_LEVEL_KEYS_ADVERTISED: frozenset[str] = _TOP_LEVEL_KEYS - {"schema_version"}
+
+
+def _check_top_level_keys(data: dict) -> None:
+    """Reject a top-level config key mien does not recognize.
+
+    The quietest typo of all: `"profles"` yields a config with zero profiles and
+    no error, so every identity vanishes and `mien which` resolves to nothing;
+    `"bootstrp"` empties the bootstrap account the GCP backend reports in its
+    "you are logged in as someone else" diagnostics. Nothing raises, so the
+    fail-open surfaces (`guard`, `statusline`, `prompt`) stay silent too.
+    """
+    for k in data:
+        if k in _TOP_LEVEL_KEYS:
+            continue
+        raise ConfigError(
+            f"config: unknown top-level key {k!r}. Valid keys are: "
+            f"{', '.join(sorted(_TOP_LEVEL_KEYS_ADVERTISED))}."
+        )
+
+
+def _check_secret_naming_keys(sn: dict) -> None:
+    """Reject a secret_naming key mien does not recognize.
+
+    A typo'd template key falls back to the built-in template, which changes
+    *where secrets live*: `mien login` writes under the built-in name while the
+    operator believes the config's name is in force, and secrets already stored
+    under the intended name become unreachable. Silent in both directions, so it
+    fails loudly instead.
+    """
+    known = {f.name for f in dc_fields(SecretNaming)}
+    for k in sn:
+        if k in known:
+            continue
+        raise ConfigError(
+            f"secret_naming: unknown key {k!r}. Valid keys are: "
             f"{', '.join(sorted(known))}."
         )
 
@@ -425,6 +483,7 @@ def _config_from_dict(raw: dict) -> Config:
     ensure_known_backend_options(secrets_backend)
 
     sn = _mapping_from_raw("secret_naming", raw.get("secret_naming") or {})
+    _check_secret_naming_keys(sn)
     secret_naming = SecretNaming(
         default=sn.get("default", "mien-{profile}-{service}-{kind}"),
         slack_token=sn.get("slack_token", "mien-{profile}-slack-{workspace}-token"),

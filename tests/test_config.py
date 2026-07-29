@@ -405,6 +405,21 @@ def test_default_for_missing_defaults_empty():
      ' "profiles": {"work": {"project_env":'
      ' [{"match": "*/work", "envs": {"AWS_PROFILE": "work"}}]}}}',
      "unknown key 'envs'"),
+    # `profles` used to parse into a config with zero profiles: every identity
+    # gone, `mien which` resolving to nothing, and no error anywhere.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profles": {"work": {}}}',
+     "unknown top-level key 'profles'"),
+    # `bootstrp` left the bootstrap account empty, so the GCP backend's
+    # "you are logged in as someone else" diagnostic named nobody.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "bootstrp": {"gcp_account": "me@example.com"}}',
+     "unknown top-level key 'bootstrp'"),
+    # The sharpest one: a typo'd template silently reverts to the built-in name,
+    # so `mien login` writes secrets somewhere other than the config says.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "secret_naming": {"defalt": "acme-{profile}-{service}-{kind}"}}',
+     "secret_naming: unknown key 'defalt'"),
 ])
 def test_every_way_a_config_breaks_is_a_configerror(raw, expect):
     """One type for every parse failure, so the CLI can report them all.
@@ -444,6 +459,46 @@ def test_an_unrecognized_backend_type_keeps_its_own_error():
            "profiles": {}}
     cfg = deserialize_config(raw)
     assert cfg.secrets_backend.options == {"vault_ocid": "ocid1..."}
+
+
+@pytest.mark.parametrize("version_key", ["$schema_version", "schema_version"])
+def test_both_schema_version_spellings_still_parse(version_key):
+    """The unknown-key check must not reject the unprefixed spelling.
+
+    `deserialize_config` has always read either one, so a config written by hand
+    (or by an older mien) with the unprefixed key loads today and has to keep
+    loading.
+    """
+    raw = {version_key: 1, "secrets_backend": {"type": "keyring"},
+           "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+           "profiles": {"work": {}}}
+    cfg = deserialize_config(raw)
+    assert cfg.schema_version == 1
+    assert list(cfg.profiles) == ["work"]
+
+
+def test_every_top_level_key_mien_writes_is_accepted():
+    """The serializer's own output must survive the check it now runs."""
+    cfg = Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={"gcp_account": "me@example.com"},
+        secret_naming=SecretNaming(default="d-{profile}", slack_token="s-{workspace}"),
+        profiles={"work": Profile(name="work")},
+    )
+    back = deserialize_config(serialize_config(cfg))
+    assert back.bootstrap == {"gcp_account": "me@example.com"}
+    assert back.secret_naming.default == "d-{profile}"
+
+
+def test_secret_naming_with_only_known_keys_is_accepted():
+    raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+           "secret_naming": {"default": "acme-{profile}-{service}-{kind}"},
+           "profiles": {}}
+    cfg = deserialize_config(raw)
+    assert cfg.secret_naming.default == "acme-{profile}-{service}-{kind}"
+    # The half not given still falls back to the built-in template.
+    assert cfg.secret_naming.slack_token == "mien-{profile}-slack-{workspace}-token"
 
 
 def test_project_env_entry_with_only_known_keys_is_accepted():

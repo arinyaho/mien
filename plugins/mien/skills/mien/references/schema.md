@@ -14,6 +14,10 @@ Top level:
 }
 ```
 
+Those five are the complete accepted top-level set; anything else is an error (see below). `$schema_version` is what mien writes, and the unprefixed `schema_version` is accepted as an equivalent spelling. `secrets_backend` is the only required one — `bootstrap`, `secret_naming` and `profiles` each default to empty when absent.
+
+`secret_naming` accepts exactly two keys, `default` and `slack_token`, each a template for a rendered backend secret name. Either may be omitted, in which case the built-in template applies (`mien-{profile}-{service}-{kind}` and `mien-{profile}-slack-{workspace}-token`).
+
 ## Backends
 
 - `gcp_secret_manager`: `{"type": "gcp_secret_manager", "project": "<gcp-project>"}`
@@ -22,11 +26,11 @@ Top level:
 
 ## Unknown keys are fatal
 
-A key mien does not recognize — at profile level, or inside any service block (`google`, `github`, a `slack` entry, `aws`, `oci`, `atlassian`, `notion`) — is a hard error, not a dropped field. The load raises `ConfigError`, so *every* command that reads the config (`list`, `use`, `exec`, `run`, `which`, `whoami`, `doctor`, `statusline`, `guard`) exits 1 until the key is removed. One typo anywhere makes the whole config unusable, not just the profile it sits in.
+A key mien does not recognize — at the top level, inside `secret_naming`, at profile level, inside any service block (`google`, `github`, a `slack` entry, `aws`, `oci`, `atlassian`, `notion`), or inside a `project_env` entry — is a hard error, not a dropped field. The load raises `ConfigError`, so *every* command that reads the config (`list`, `use`, `exec`, `run`, `which`, `whoami`, `doctor`, `statusline`, `guard`) exits 1 until the key is removed. One typo anywhere makes the whole config unusable, not just the profile it sits in.
 
-That blast radius is deliberate. Silently dropping the key is the quieter failure and the worse one: `"defualt_for"` discards the directory claim and the directory falls through to some other profile's catch-all glob; `"profil"` in an `aws` block leaves `AWS_PROFILE` unexported and the CLI falls back to its own default account. Nothing warns, the command succeeds, and it succeeds as the wrong person. A misconfigured identity has to fail loudly.
+That blast radius is deliberate. Silently dropping the key is the quieter failure and the worse one: `"profles"` at the top level yields a config with *zero* profiles, so every identity disappears and `mien which` resolves to nothing; `"defalt"` in `secret_naming` reverts to the built-in template, so `mien login` writes secrets under a different name than the config declares and anything already stored under the intended name becomes unreachable; `"defualt_for"` discards a directory claim and the directory falls through to some other profile's catch-all glob; `"profil"` in an `aws` block leaves `AWS_PROFILE` unexported and the CLI falls back to its own default account. Nothing warns, the command succeeds, and it succeeds as the wrong person. A misconfigured identity has to fail loudly.
 
-The message names the offending key and lists the valid ones for that block, so the fix is mechanical. **When hand-editing a profile, add only keys enumerated below.**
+The message names the offending key and lists the valid ones for that block, so the fix is mechanical. **When hand-editing, add only keys enumerated here — the five top-level keys above, `default` / `slack_token` inside `secret_naming`, and the profile and service keys below.**
 
 Keys from older mien versions are tolerated by name, and only at the value that made their removal a no-op — an old config still loads:
 

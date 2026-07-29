@@ -533,6 +533,32 @@ def test_default_for_missing_defaults_empty():
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "profiles": {"work": {"project_env": [{"match": "*", "env": "A=1"}]}}}',
      "profile 'work': project_env '\\*' env must be a JSON object"),
+    # `match` is the one value in a project_env entry that reached the scope
+    # unchecked while the key set and `env`'s shape were both checked. `mien env
+    # sync` then died on a bare TypeError out of `_VAR_RE.finditer` (unexpandable
+    # -scope warning) or an AttributeError out of `match_base` — neither of which
+    # `env_sync_cmd` catches, so the operator got a traceback instead of the
+    # "here is what is wrong with your config" the parser owes them.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": [{"match": null}]}}}',
+     "'match' must be a directory glob string.*got NoneType"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": [{"match": ["*/a", "*/b"]}]}}}',
+     "'match' must be a directory glob string.*got list"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": [{"match": 7}]}}}',
+     "'match' must be a directory glob string.*got int"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": [{"match": {"dir": "*/work"}}]}}}',
+     "'match' must be a directory glob string.*got dict"),
+    # An empty glob is not "an empty scope": `match_base("")` is `""`, so `mien
+    # env sync` emits `case "$PWD/" in /*)`, which fires in every directory and
+    # exports the scope's env everywhere — the same silent widening as the `"*"`
+    # element `_glob_list_from_raw` rejects, arriving by a quieter route.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": [{"match": "",'
+     ' "env": {"AWS_PROFILE": "work"}}]}}}',
+     "has an empty 'match' glob"),
     # A mistyped backend option used to be swept into `options` unchecked and
     # escape much later as a bare `KeyError: 'project'` out of `load_backend` —
     # from `mien doctor`, the command mien's own markers tell you to run.
@@ -754,6 +780,25 @@ def test_project_env_entry_with_only_known_keys_is_accepted():
     scopes = deserialize_config(raw).profiles["work"].project_env
     assert [(s.match, s.env) for s in scopes] == [
         ("*/work", {"AWS_PROFILE": "work"}), ("*/solo", {})]
+
+
+def test_a_string_match_still_parses_in_every_form_a_scope_is_written():
+    """The `match` check must not narrow what a working scope may say.
+
+    A glob, a `~` path and a `$VAR` reference are all left to `mien.resolve` and
+    `mien.ambient` to expand; parsing only insists that the value is a non-empty
+    string.
+    """
+    raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+           "profiles": {"work": {"project_env": [
+               {"match": "*/work", "env": {"AWS_PROFILE": "work"}},
+               {"match": "~/Projects/acme/"},
+               {"match": "$WORK_ROOT/*"},
+           ]}}}
+    scopes = deserialize_config(raw).profiles["work"].project_env
+    assert [s.match for s in scopes] == [
+        "*/work", "~/Projects/acme/", "$WORK_ROOT/*"]
+    assert scopes[0].env == {"AWS_PROFILE": "work"}
 
 
 def test_a_retired_profile_key_still_loads():

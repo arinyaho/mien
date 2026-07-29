@@ -217,6 +217,24 @@ def _config_to_dict(cfg: Config) -> dict:
     }
 
 
+def _glob_string(must_be: str, value: object) -> str:
+    """Validate one glob string -- the unit a list-of-globs field is made of and
+    a ``project_env`` entry's ``match`` is.
+
+    ``must_be`` is the whole "<where> must be ..." clause rather than its parts,
+    so a caller checking every entry of a list can speak in the plural and one
+    checking a single value in the singular, while the "got <type>: <value>"
+    tail they share cannot drift apart. Every glob in the config is read by
+    ``fnmatch``/``re`` as text (``mien.resolve``, ``mien.ambient``), so a
+    wrong-typed one escapes as ``TypeError``/``AttributeError`` from whichever
+    command touches it first -- which the fail-open surfaces do not recognize as
+    a config failure at all. See ``_mapping_from_raw``.
+    """
+    if not isinstance(value, str):
+        raise ConfigError(f"{must_be}, got {type(value).__name__}: {value!r}")
+    return value
+
+
 def _glob_list_from_raw(
     profile_name: str, field_name: str, kind: str, value: object, example: str
 ) -> list[str]:
@@ -235,11 +253,11 @@ def _glob_list_from_raw(
             f"strings (e.g. [{example!r}]), got {type(value).__name__}: {value!r}"
         )
     for item in value:
-        if not isinstance(item, str):
-            raise ConfigError(
-                f"profile {profile_name!r}: {field_name} entries must be {kind} glob "
-                f"strings, got {type(item).__name__}: {item!r}"
-            )
+        _glob_string(
+            f"profile {profile_name!r}: {field_name} entries must be {kind} glob "
+            f"strings",
+            item,
+        )
     return list(value)
 
 
@@ -598,14 +616,34 @@ def _config_from_dict(raw: dict) -> Config:
             if "match" not in s_:
                 raise ConfigError(
                     f"profile {name!r}: a project_env entry has no 'match' glob: {s_!r}")
+            # Checked before the label below is built from it, and before it
+            # reaches `match_base`/`_VAR_RE` in `mien env sync` — a non-string
+            # dies there as a bare AttributeError/TypeError that `env_sync_cmd`
+            # does not catch. An empty glob is rejected for the opposite reason:
+            # `match_base("")` is `""`, so the emitted `case "$PWD/" in /*)`
+            # fires in every directory and the scope's env is exported
+            # everywhere. Same silent widening as the `"*"` element that
+            # `_glob_list_from_raw` exists to stop.
+            match = _glob_string(
+                f"profile {name!r}: project_env entry {s_!r}: 'match' must be a "
+                f"directory glob string (e.g. '*/Projects/acme')",
+                s_["match"],
+            )
+            if not match:
+                raise ConfigError(
+                    f"profile {name!r}: project_env entry {s_!r} has an empty "
+                    f"'match' glob. An empty glob covers every directory, so this "
+                    f"scope's env would be exported everywhere. Write the directory "
+                    f"it applies to, e.g. '*/Projects/acme'."
+                )
             _reject_unknown_keys(
-                f"profile {name!r}: project_env entry {s_.get('match')!r}", s_,
+                f"profile {name!r}: project_env entry {match!r}", s_,
                 {f.name for f in dc_fields(ProjectEnvScope)},
             )
             project_env.append(ProjectEnvScope(
-                match=s_["match"],
+                match=match,
                 env=dict(_optional_mapping_from_raw(
-                    f"profile {name!r}: project_env {s_['match']!r} env",
+                    f"profile {name!r}: project_env {match!r} env",
                     s_.get("env"))),
             ))
         profiles[name] = Profile(

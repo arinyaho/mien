@@ -36,6 +36,7 @@ from mien.config import (
     save_config,
 )
 from mien.env import build_env
+from mien.handover import refusal_reason
 from mien.manifest import (
     MANIFEST_SECRET_NAME,
     ManifestError,
@@ -1190,14 +1191,52 @@ def _run_as_profile(cfg: Config, prof: Profile, argv: tuple[str, ...]) -> None:
     sys.exit(rc)
 
 
+def _refuse_wrong_identity(cfg: Config, profile_name: str) -> None:
+    """Block an agent-driven `exec` that names an identity this place disowns.
+
+    Gathers the signals and lets `handover.refusal_reason` decide, the way
+    `guard_cmd` defers to `guard_reason` — the policy stays out of this file and
+    stays testable without a CLI runner.
+
+    `MIEN_EXEC=off` disarms it, following `MIEN_GUARD`. That escape is for a
+    person debugging a false refusal, so it is documented in the README and
+    deliberately absent from the refusal text: an agent that reads the error
+    must not be handed the bypass in the same breath.
+
+    Fail open on anything unexpected, exactly as `guard` does. This runs before
+    a backend is loaded, so a refusal also spends no credential.
+    """
+    if os.environ.get("MIEN_EXEC", "").strip().lower() in _GUARD_OFF:
+        return
+    try:
+        cwd = _logical_cwd()
+        reason = refusal_reason(
+            cfg.profiles, cwd, profile_name,
+            remote=git_origin_remote(cwd),
+            agent_driven=capture_context() is not None,
+        )
+    except Exception:
+        return  # never wedge a handover because the check itself broke.
+    if reason:
+        raise click.ClickException(reason)
+
+
 @main.command("exec", context_settings={"ignore_unknown_options": True})
 @click.argument("profile_name")
 @click.argument("argv", nargs=-1, required=True)
 def exec_cmd(profile_name: str, argv: tuple[str, ...]) -> None:
+    """Run a command as `profile_name`, with that identity's env.
+
+    Refuses when an agent harness is driving the call and this place visibly
+    belongs to a different profile — see `_refuse_wrong_identity`. A person at a
+    terminal never triggers that check.
+    """
     cfg = _require_config()
     prof = cfg.profiles.get(profile_name)
     if not prof:
         raise click.ClickException(f"profile {profile_name!r} not found")
+    # Before any credential is loaded: a refused handover must cost nothing.
+    _refuse_wrong_identity(cfg, profile_name)
     _run_as_profile(cfg, prof, argv)
 
 

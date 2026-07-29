@@ -54,7 +54,7 @@ $MIEN list                          # see profiles
 $MIEN status                        # what is active in *this* shell
 $MIEN whoami [<profile>]            # the whole bundled identity as a card; --json for machine form; --live to verify
 $MIEN use <profile>                 # prints a `source …; rm …` loader; eval to activate (same call only)
-$MIEN exec <profile> -- <cmd...>    # run cmd with the profile's env — prefer this
+$MIEN exec <profile> -- <cmd...>    # run cmd with the profile's env — prefer this; refuses a profile this place disowns
 $MIEN which                         # profile claimed by the current directory
 $MIEN claim <profile>               # bind THIS workspace to a profile via a local .mien (writes, approves, git-ignores)
 $MIEN allow                         # approve an existing .mien so it can drive identity here
@@ -232,6 +232,7 @@ $MIEN exec work-foo -- oci iam user get --user-id <ocid>   # uses OCI_CLI_PROFIL
   - Use a credential reference, not the value: `mien login <profile> --service <svc> --secret-cmd 'op read op://Vault/item/field'` (also works with `gcloud secrets versions access`, `security find-generic-password`, etc.). The `op://…` reference is safe to appear in history; the secret never does.
   - For Google, a pre-existing refresh token can be piped: `… --refresh-token-stdin < tokenfile` with the client secret via `--secret-cmd`.
 - **Don't switch the active profile in this shell** if the user is asking for a one-off in another identity — use `mien exec <other> -- <cmd>` so the parent shell stays clean.
+- **A refused `exec` is not a broken command.** Under an agent harness, `mien exec <p> -- …` refuses when this place visibly belongs to a *different* profile — the repository's `origin` owner, or a `default_for` scope. Nothing runs and no credential is loaded, and the error names the profile that does claim the place: re-run as that profile, or stop and ask the user if you believe the profile you named is the right one. Do not look for a way around it; there is none from here, by design. (A person at a terminal never triggers this check.)
 - **Don't use the agent's native Google/Slack/Atlassian/Notion connectors** when `mien` is configured — they are single-account and bypass the user's vault.
 
 ## References

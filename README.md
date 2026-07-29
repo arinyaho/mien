@@ -196,7 +196,7 @@ It figures out whose place this is from two signals — the repository's `origin
 }
 ```
 
-A profile can own several remote patterns — a personal account and the organizations it also manages. The remote owner is **advisory only**: it drives the status line's display and warning, never `run`/`exec` (which *act*), because a checked-out repository controls its own remote and must not be able to choose the identity that acts. It reads config names and scopes only, never a token, so it is safe to run at status-line frequency, and it prints nothing when `mien` is not configured.
+A profile can own several remote patterns — a personal account and the organizations it also manages. The remote owner **never selects an identity**: it drives the status line's display and warning, and it can *refuse* an action (`mien guard`, and the `mien exec` check below), but it never decides which profile `which`/`run` resolve to — because a checked-out repository controls its own remote and must not be able to choose the identity that acts. Blocking is the safe direction: a crafted `origin` can at worst cost you a false refusal, never a mis-action. It reads config names and scopes only, never a token, so it is safe to run at status-line frequency, and it prints nothing when `mien` is not configured.
 
 ## Refuse to act as the wrong you
 
@@ -216,6 +216,25 @@ mien: refusing — a commit here would be authored as personal, but this reposit
 For a global hook across every repository, point `core.hooksPath` at a directory holding a `pre-commit` that runs `exec mien guard`. Chain it before other risky actions too — `mien guard && git push`.
 
 It refuses only what it is sure about: no config, an unknown owner, or an unrecognized author all *allow* (it never blocks on a guess), and any internal error allows too, so a bug can't wedge your commits. Every refusal is overridable — `MIEN_GUARD=off`, `--force`, or `git commit --no-verify` — so it guides rather than traps. Using the repository's own signals to *block* is safe in a way that using them to *act* is not: a crafted `origin` can at worst cause a false refusal you override, never a mis-action.
+
+### `mien exec` refuses the wrong identity for this place
+
+`mien exec <profile> -- <cmd>` names its identity explicitly, which is why it is the right form for an agent — no shell state to survive between calls. The cost is that the name is only as good as whoever typed it, and an agent that types the wrong one hands a whole credential bundle to a command running in someone else's repository, with nothing in the transcript that looks unusual.
+
+So when an **agent harness is driving the call** and the named profile contradicts the profile this place visibly claims, `exec` refuses before any credential is loaded:
+
+```
+$ mien exec personal -- gh pr create
+Error: refusing to hand over credentials: this call asked for profile 'personal', but this repository belongs to 'work' (its git origin owner).
+  Nothing ran and no credential was loaded — mien declined the handover; the command itself did not fail.
+  Act as the identity this place claims:
+    mien exec work -- <your command>
+  If 'personal' really is the right identity for this work, run it somewhere that belongs to 'personal'.
+```
+
+A person at a terminal never meets this check at all: it fires only under the same agent-harness detection `mien token` uses (`$CLAUDECODE`, `$CLAUDE_CODE_ENTRYPOINT`, or `MIEN_CAPTURED=1` for a harness mien does not recognize). There is deliberately **no `--force`** — an override an agent can reach for is one it will reach for, and the refusal is the entire control.
+
+Like `guard`, it fails open on every uncertainty: no config, nothing claiming this place, an ambiguous claim, no repository or no remote, or any internal error all allow the handover. For a false refusal you need to get past while you fix the underlying config, set `MIEN_EXEC=off` (also `0`, `false`, `no`) — the same convention as `MIEN_GUARD`. It is documented here and not in the error text, because the human who needs it reads the docs and the agent that must not have it reads the error.
 
 ## Commit as the right you — git's own job
 

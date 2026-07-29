@@ -30,6 +30,8 @@ Treat the config file and the backend manifest as trusted input. Do not import a
 
 `mien guard` uses the same repo signals to *block* an action, and that direction is safe where selecting an identity is not: a crafted `origin` can at worst trigger a false refusal — an annoyance you override with `MIEN_GUARD=off` — never a mis-action. The gate is fail-open by design (it allows on any uncertainty or internal error), so it is a guard rail, not a guarantee: it stops the mistakes it is sure about and never wedges a legitimate action.
 
+`mien exec` blocks in that same direction, and only in that direction. When an agent harness is driving the call — detected exactly as `mien token`'s capture refusal detects it — and the profile named on the command line contradicts the profile this place claims by `owns_remotes` or `default_for`, the handover is refused before any credential is loaded. The repo signal still cannot *choose* an identity here: it can only veto the one that was named explicitly, so a crafted `origin` buys a false refusal and never a mis-routed credential. This gate is fail-open on every uncertainty and on any internal error too, and it never fires for a person at a terminal. It has no per-call `--force`, on the reasoning that an override the agent can see is an override the agent will use; `MIEN_EXEC=off` exists for a human debugging a false refusal and is documented in the README rather than named in the refusal.
+
 **Non-repudiation: no protections attempted.** `mien` keeps no audit log. Nothing records which identity was activated when, or which command ran under it.
 
 ## What is stored where

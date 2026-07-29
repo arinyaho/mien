@@ -232,6 +232,8 @@ Error: refusing to hand over credentials: this call asked for profile 'personal'
   If 'personal' really is the right identity for this work, run it somewhere that belongs to 'personal'.
 ```
 
+An **approved `.mien` outranks the repository**: in a workspace you bound with `mien claim`/`mien allow`, that profile is the claim, so `exec` allows it even when `origin` belongs to someone else — and refuses the *other* profile against the declaration. That keeps the gate agreeing with `which`, `run` and the status line about the same directory. An unapproved `.mien` counts for nothing here, exactly as it counts for nothing when choosing an identity that acts.
+
 A person at a terminal never meets this check at all: it fires only under the same agent-harness detection `mien token` uses (`$CLAUDECODE`, `$CLAUDE_CODE_ENTRYPOINT`, or `MIEN_CAPTURED=1` for a harness mien does not recognize). There is deliberately **no `--force`** — an override an agent can reach for is one it will reach for, and the refusal is the entire control.
 
 Like `guard`, it fails open on every uncertainty: no config, nothing claiming this place, an ambiguous claim, no repository or no remote, or any internal error all allow the handover. For a false refusal you need to get past while you fix the underlying config, set `MIEN_EXEC=off` (also `0`, `false`, `no`) — the same convention as `MIEN_GUARD`. It is documented here and not in the error text, because the human who needs it reads the docs and the agent that must not have it reads the error.

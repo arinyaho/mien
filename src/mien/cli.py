@@ -1191,12 +1191,35 @@ def _run_as_profile(cfg: Config, prof: Profile, argv: tuple[str, ...]) -> None:
     sys.exit(rc)
 
 
+def _declaration_here(cfg: Config, cwd: str) -> tuple[str | None, bool]:
+    """The `.mien` profile declared at or above ``cwd``, and whether it counts.
+
+    A declaration counts only when the user approved that exact (path, profile)
+    and the profile is still in the config — a checked-out file may not choose an
+    identity, and a renamed profile leaves a stale approval behind. The raw name
+    comes back too, for the callers that say something about a declaration they
+    are declining to honour.
+
+    One implementation, because two readers that disagree about what "declared
+    here" means is a bug the user experiences as `mien which` and `mien exec`
+    answering differently in the same directory.
+    """
+    declared, decl_path = find_declaration(cwd)
+    approved = bool(
+        declared and decl_path and declared in cfg.profiles
+        and is_allowed(decl_path, declared)
+    )
+    return declared, approved
+
+
 def _refuse_wrong_identity(cfg: Config, profile_name: str) -> None:
     """Block an agent-driven `exec` that names an identity this place disowns.
 
     Gathers the signals and lets `handover.refusal_reason` decide, the way
     `guard_cmd` defers to `guard_reason` — the policy stays out of this file and
-    stays testable without a CLI runner.
+    stays testable without a CLI runner. An approved `.mien` is one of those
+    signals and outranks the rest, so the gate agrees with every other resolver
+    about a workspace the user bound by hand.
 
     `MIEN_EXEC=off` disarms it, following `MIEN_GUARD`. That escape is for a
     person debugging a false refusal, so it is documented in the README and
@@ -1210,9 +1233,11 @@ def _refuse_wrong_identity(cfg: Config, profile_name: str) -> None:
         return
     try:
         cwd = _logical_cwd()
+        declared, declared_ok = _declaration_here(cfg, cwd)
         reason = refusal_reason(
             cfg.profiles, cwd, profile_name,
             remote=git_origin_remote(cwd),
+            declared=declared if declared_ok else None,
             agent_driven=capture_context() is not None,
         )
     except Exception:
@@ -1473,11 +1498,7 @@ def _identity_segment(cfg: Config, cwd: str) -> str:
     # A project-local `.mien` declaration, if present. Approved → it is the claim
     # (it outranks central scopes, as in resolution); present-but-unapproved →
     # surfaced as pending so the segment invites `mien allow` rather than acting.
-    declared, decl_path = find_declaration(cwd)
-    declared_ok = bool(
-        declared and decl_path and declared in cfg.profiles
-        and is_allowed(decl_path, declared)
-    )
+    declared, declared_ok = _declaration_here(cfg, cwd)
     if declared and not declared_ok and not env_profile:
         return render_segment(None, None, pending=declared)
     claimed: str | None = None

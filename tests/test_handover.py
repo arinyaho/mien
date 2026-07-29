@@ -16,6 +16,7 @@ from mien.cli import main
 from mien.config import (BackendConfig, Config, Profile, SecretNaming,
                          save_config)
 from mien.handover import refusal_reason
+from mien.project import record_allow, write_declaration
 
 ACME_REMOTE = "https://github.com/acme-core/api.git"
 
@@ -65,6 +66,21 @@ def _exec(runner, monkeypatch, mocker, profile, *, cwd="/flat/api", remote=None,
         invoke_env.setdefault("CLAUDECODE", "1")
     result = runner.invoke(main, ["exec", profile, "--", "true"], env=invoke_env)
     return result, called
+
+
+def _declare(tmp_path, profile: str, *, approved: bool) -> str:
+    """A workspace with a `.mien` naming ``profile``, approved or not.
+
+    `approved` is the whole distinction the gate has to respect: the same file
+    on disk either is the user's decision about this workspace, or is a
+    checked-out file that has not been trusted yet.
+    """
+    place = tmp_path / "api"
+    place.mkdir(exist_ok=True)
+    decl = write_declaration(str(place), profile)
+    if approved:
+        record_allow(decl, profile)
+    return str(place)
 
 
 # --- the decision itself -----------------------------------------------------
@@ -137,6 +153,30 @@ class TestRefusalReason:
         assert "origin" in by_repo and "default_for" not in by_repo
         assert "default_for" in by_dir and "origin" not in by_dir
 
+    def test_an_approved_declaration_allows_the_profile_it_names(self):
+        """The user bound this workspace to `personal` by hand; the repository's
+        `origin` belongs to `work`. The binding is the answer."""
+        assert refusal_reason(
+            _owns_remotes(work=["github.com/acme-*/*"],
+                          personal=["github.com/me/*"]),
+            "/flat/api", "personal", remote=ACME_REMOTE, declared="personal",
+            agent_driven=True,
+        ) is None
+
+    def test_an_approved_declaration_is_the_claim_that_is_quoted(self):
+        """When the declaration and the request disagree, the refusal must argue
+        with the declaration — pointing at the `origin` owner would send the
+        caller to an identity this workspace was never bound to."""
+        reason = refusal_reason(
+            _owns_remotes(work=["github.com/acme-*/*"],
+                          personal=["github.com/me/*"]),
+            "/flat/api", "work", remote=ACME_REMOTE, declared="personal",
+            agent_driven=True,
+        )
+        assert reason is not None
+        assert ".mien" in reason and "origin" not in reason
+        assert "mien exec personal -- <your command>" in reason
+
 
 # --- the command -------------------------------------------------------------
 
@@ -160,24 +200,85 @@ def test_exec_refuses_a_profile_the_repository_disowns(
     called.assert_not_called()
 
 
-def test_exec_refusal_rests_on_owns_remotes_not_only_directory_scopes(
-    runner, tmp_path, monkeypatch, mocker
-):
-    """The check must use the *display* resolver, which reads `owns_remotes`.
+def test_exec_ignores_an_unapproved_declaration(runner, tmp_path, monkeypatch, mocker):
+    """An unapproved `.mien` is inert here, exactly as it is for `which`/`run`.
 
-    Wired to the acting resolver (`resolve_profile`) instead, this whole feature
-    would be a no-op for any profile with an empty `default_for` — which is most
-    of them. Neither profile here has a directory scope at all, so this test
-    fails outright if the wrong resolver is used, while a `default_for`-based
-    test would pass either way.
+    Approval is what turns a checked-out file into the user's decision; without
+    it the claim falls back to the repository's `origin` owner and the mismatch
+    is refused as before. That fallback also pins the *display* resolver: wired
+    to the acting resolver (`resolve_profile`) instead, this whole feature would
+    be a no-op for any profile with an empty `default_for` — which is most of
+    them. Neither profile here has a directory scope at all, so this fails
+    outright if the wrong resolver is used.
     """
     _write_config(tmp_path, monkeypatch,
                   _owns_remotes(work=["github.com/acme-*/*"],
                                 personal=["github.com/me/*"]))
-    result, called = _exec(runner, monkeypatch, mocker, "personal", remote=ACME_REMOTE)
+    place = _declare(tmp_path, "personal", approved=False)
+    result, called = _exec(runner, monkeypatch, mocker, "personal",
+                           cwd=place, remote=ACME_REMOTE)
     assert result.exit_code != 0
     assert "origin" in result.output  # the claim came from the repository
+    assert "'work'" in result.output
     called.assert_not_called()
+
+
+def test_exec_honours_an_approved_declaration_over_the_repository(
+    runner, tmp_path, monkeypatch, mocker
+):
+    """The workspace the user bound to `personal`, inside a repo whose `origin`
+    belongs to `work`: every other resolver says `personal`, so the gate must
+    not be the one command that refuses it. Its only advice would have been to
+    act as `work` here — steering an agent into the wrong identity."""
+    _write_config(tmp_path, monkeypatch,
+                  _owns_remotes(work=["github.com/acme-*/*"],
+                                personal=["github.com/me/*"]))
+    place = _declare(tmp_path, "personal", approved=True)
+    result, called = _exec(runner, monkeypatch, mocker, "personal",
+                           cwd=place, remote=ACME_REMOTE)
+    assert result.exit_code == 0, result.output
+    called.assert_called_once()
+
+
+def test_exec_refuses_against_the_declaration_not_the_remote(
+    runner, tmp_path, monkeypatch, mocker
+):
+    """The declaration also blocks: asking for `work` in a workspace bound to
+    `personal` is refused, and the message quotes the declaration — sending the
+    caller to the `origin` owner would be sending it away from the binding."""
+    _write_config(tmp_path, monkeypatch,
+                  _owns_remotes(work=["github.com/acme-*/*"],
+                                personal=["github.com/me/*"]))
+    place = _declare(tmp_path, "personal", approved=True)
+    result, called = _exec(runner, monkeypatch, mocker, "work",
+                           cwd=place, remote=ACME_REMOTE)
+    assert result.exit_code != 0
+    assert ".mien" in result.output and "origin" not in result.output
+    assert "mien exec personal -- <your command>" in result.output
+    called.assert_not_called()
+
+
+def test_which_and_the_gate_agree_about_the_same_directory(
+    runner, tmp_path, monkeypatch, mocker
+):
+    """The regression that made this findable: in one directory, `mien which`
+    answered `personal` while `mien exec personal` refused. Whatever the
+    resolvers decide, an acting command and the gate in front of it must not
+    disagree about who this place is."""
+    _write_config(tmp_path, monkeypatch,
+                  _owns_remotes(work=["github.com/acme-*/*"],
+                                personal=["github.com/me/*"]))
+    monkeypatch.delenv("MIEN_PROFILE", raising=False)
+    place = _declare(tmp_path, "personal", approved=True)
+
+    result, called = _exec(runner, monkeypatch, mocker, "personal",
+                           cwd=place, remote=ACME_REMOTE)
+    which = runner.invoke(main, ["which"])  # same faked place as `_exec`
+
+    assert which.exit_code == 0, which.output
+    assert which.output.strip() == "personal"
+    assert result.exit_code == 0, result.output
+    called.assert_called_once()
 
 
 def test_exec_refuses_a_directory_scope_mismatch(runner, tmp_path, monkeypatch, mocker):

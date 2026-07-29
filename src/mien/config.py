@@ -250,13 +250,36 @@ def _mapping_from_raw(where: str, value: object) -> dict:
     wrong-typed value would escape as ``TypeError``/``AttributeError`` rather
     than ``ConfigError`` -- and the fail-open surfaces (guard, status line) only
     recognize ``ConfigError`` as "I have stopped working", so anything else exits
-    in silence. Same shape-check-don't-coerce rule as ``_glob_list_from_raw``.
+    in silence. Same shape-check-don't-coerce rule as ``_glob_list_from_raw``:
+    every value reaching here is checked, never coerced, so a block that may be
+    absent goes through ``_optional_mapping_from_raw`` rather than being turned
+    into ``{}`` by the caller before it gets here.
     """
     if not isinstance(value, dict):
         raise ConfigError(
             f"{where} must be a JSON object, got {type(value).__name__}: {value!r}"
         )
     return value
+
+
+def _optional_mapping_from_raw(where: str, value: object) -> dict:
+    """Read a block that defaults to empty when it is absent, shape-checked.
+
+    Absence is the only thing that means "empty": ``value is None`` (the key is
+    missing, or explicitly null) yields ``{}``, and everything else goes to
+    ``_mapping_from_raw`` and keeps its shape error. The ``or {}`` this replaces
+    coerced *before* the check, so a falsy wrong-typed block (``"profiles": []``,
+    ``"secret_naming": []``) was silently read as empty — zero profiles, or the
+    built-in secret-name templates back in force, deciding where secrets live
+    with no error anywhere. Same absent-is-None rule as ``_glob_list_from_raw``,
+    ``_object_list_from_raw``, and ``_service_from_raw``, so the answer no longer
+    depends on how deeply the block is nested. Present-but-empty (``{}``) still
+    parses exactly as absence does: an empty block asks for nothing, it is not a
+    truncated one.
+    """
+    if value is None:
+        return {}
+    return _mapping_from_raw(where, value)
 
 
 def _object_list_from_raw(where: str, value: object) -> list[dict]:
@@ -529,7 +552,8 @@ def _service_from_raw(cls, profile_name: str, key: str, p: dict):
 
 
 def _config_from_dict(raw: dict) -> Config:
-    sb_raw = dict(_mapping_from_raw("secrets_backend", raw.get("secrets_backend") or {}))
+    sb_raw = dict(
+        _optional_mapping_from_raw("secrets_backend", raw.get("secrets_backend")))
     if "type" not in sb_raw:
         raise ConfigError(
             "secrets_backend.type is missing — mien cannot tell where your "
@@ -543,7 +567,7 @@ def _config_from_dict(raw: dict) -> Config:
     from mien.backends import ensure_known_backend_options
     ensure_known_backend_options(secrets_backend)
 
-    sn = _mapping_from_raw("secret_naming", raw.get("secret_naming") or {})
+    sn = _optional_mapping_from_raw("secret_naming", raw.get("secret_naming"))
     _reject_unknown_keys("secret_naming", sn, {f.name for f in dc_fields(SecretNaming)})
     secret_naming = SecretNaming(
         default=sn.get("default", "mien-{profile}-{service}-{kind}"),
@@ -551,7 +575,7 @@ def _config_from_dict(raw: dict) -> Config:
     )
 
     profiles: dict[str, Profile] = {}
-    for name, p in _mapping_from_raw("profiles", raw.get("profiles") or {}).items():
+    for name, p in _optional_mapping_from_raw("profiles", raw.get("profiles")).items():
         p = _mapping_from_raw(f"profile {name!r}", p)
         _reject_unknown_keys(
             f"profile {name!r}", p,
@@ -580,9 +604,9 @@ def _config_from_dict(raw: dict) -> Config:
             )
             project_env.append(ProjectEnvScope(
                 match=s_["match"],
-                env=dict(_mapping_from_raw(
+                env=dict(_optional_mapping_from_raw(
                     f"profile {name!r}: project_env {s_['match']!r} env",
-                    s_.get("env") or {})),
+                    s_.get("env"))),
             ))
         profiles[name] = Profile(
             name=name,
@@ -604,7 +628,7 @@ def _config_from_dict(raw: dict) -> Config:
     return Config(
         schema_version=SCHEMA_VERSION,
         secrets_backend=secrets_backend,
-        bootstrap=_mapping_from_raw("bootstrap", raw.get("bootstrap") or {}),
+        bootstrap=_optional_mapping_from_raw("bootstrap", raw.get("bootstrap")),
         secret_naming=secret_naming,
         profiles=profiles,
     )

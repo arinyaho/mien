@@ -569,6 +569,33 @@ def test_default_for_missing_defaults_empty():
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "secret_naming": {"defalt": "acme-{profile}-{service}-{kind}"}}',
      "secret_naming: unknown key 'defalt'"),
+    # A *falsy* wrong-typed block is the same defect as a truthy one, and used to
+    # be swept under `or {}` before the shape check ever ran: `[]` read as "empty
+    # block", so `"profiles": []` meant zero identities, `"secret_naming": []`
+    # meant the built-in templates back in force (secrets written somewhere other
+    # than the config says), and `"bootstrap": []` meant no bootstrap account.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": []}',
+     r"profiles must be a JSON object, got list: \[\]"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "secret_naming": []}',
+     r"secret_naming must be a JSON object, got list: \[\]"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "bootstrap": []}',
+     r"bootstrap must be a JSON object, got list: \[\]"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env": [{"match": "*", "env": []}]}}}',
+     r"profile 'work': project_env '\*' env must be a JSON object, got list"),
+    # Falsy scalars too — `0`/`false`/`""` are all "present and wrong-typed".
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": 0}',
+     "profiles must be a JSON object, got int"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "secret_naming": false}',
+     "secret_naming must be a JSON object, got bool"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "bootstrap": ""}',
+     "bootstrap must be a JSON object, got str"),
 ])
 def test_every_way_a_config_breaks_is_a_configerror(raw, expect):
     """One type for every parse failure, so the CLI can report them all.
@@ -579,6 +606,63 @@ def test_every_way_a_config_breaks_is_a_configerror(raw, expect):
     """
     with pytest.raises(ConfigError, match=expect):
         deserialize_config(raw)
+
+
+def test_a_wrong_typed_secrets_backend_is_a_shape_error_not_a_missing_type():
+    """`[]` is a mis-typed block, not a block that forgot its 'type'.
+
+    Coercing it to `{}` before the shape check made the parser report the one
+    key the operator never wrote, sending them to add `"type"` to a value that
+    cannot hold keys at all. The truthy `"secrets_backend": "keyring"` already
+    said "must be a JSON object"; the falsy one has to say the same thing.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config({"$schema_version": 1, "secrets_backend": []})
+    assert "secrets_backend must be a JSON object" in str(exc.value)
+    assert "type is missing" not in str(exc.value)
+
+
+def test_an_absent_or_empty_block_still_means_empty():
+    """The fix must not invent a "must be non-empty" rule.
+
+    Absence and `{}` are both "nothing configured here" and always were: zero
+    profiles, no bootstrap account, the built-in secret-name templates. Only a
+    *present and wrong-typed* block changed behaviour.
+    """
+    absent = {"$schema_version": 1, "secrets_backend": {"type": "keyring"}}
+    empty = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+             "profiles": {}, "bootstrap": {}, "secret_naming": {}}
+    for raw in (absent, empty):
+        cfg = deserialize_config(raw)
+        assert cfg.profiles == {}
+        assert cfg.bootstrap == {}
+        assert cfg.secret_naming.default == "mien-{profile}-{service}-{kind}"
+        assert cfg.secret_naming.slack_token == "mien-{profile}-slack-{workspace}-token"
+
+
+def test_an_absent_or_empty_project_env_env_still_means_no_exports():
+    raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+           "profiles": {"work": {"project_env": [
+               {"match": "*/absent"},
+               {"match": "*/empty", "env": {}},
+           ]}}}
+    scopes = deserialize_config(raw).profiles["work"].project_env
+    assert [(s.match, s.env) for s in scopes] == [("*/absent", {}), ("*/empty", {})]
+
+
+def test_an_explicitly_null_block_is_absence_not_a_wrong_type():
+    """`null` is how "not configured" is spelled elsewhere in this parser.
+
+    `"github": null` already means "this profile has no github", so a null outer
+    block has to keep meaning absence too — the shape check applies to a value
+    that is *there*.
+    """
+    raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+           "profiles": None, "bootstrap": None, "secret_naming": None}
+    cfg = deserialize_config(raw)
+    assert cfg.profiles == {}
+    assert cfg.bootstrap == {}
+    assert cfg.secret_naming.default == "mien-{profile}-{service}-{kind}"
 
 
 @pytest.mark.parametrize("backend", [

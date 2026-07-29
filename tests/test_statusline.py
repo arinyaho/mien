@@ -1,6 +1,8 @@
 import json
+import os
 import re
 
+import pytest
 from click.testing import CliRunner
 
 from mien.cli import main
@@ -492,6 +494,125 @@ def test_guard_allows_when_mien_is_unconfigured(tmp_path, monkeypatch):
     result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
                         remote="https://github.com/acme-core/api.git")
     assert result.exit_code == 0
+
+
+def _write_unopenable_cfg(tmp_path, monkeypatch):
+    """A config that is present and perfectly valid, but cannot be OPENED.
+
+    The other half of "unreadable": `_write_broken_cfg` is a file mien can read
+    and not parse; this is one mien cannot read at all — mode 0600 owned by
+    another user on a shared machine, or a config written under `sudo`. Both
+    leave mien unable to say who you are, so both have to be announced instead
+    of being swallowed by a catch-all.
+
+    The config underneath is deliberately a *working* one that renders a healthy
+    green segment, so if the file ever becomes readable again these tests fail
+    rather than passing for the wrong reason.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file regardless")
+    _write_cfg_remotes(tmp_path, monkeypatch, work=["github.com/acme-*/*"])
+    (tmp_path / "config.json").chmod(0o000)
+
+
+def _point_cfg_at_a_directory(tmp_path, monkeypatch):
+    """MIEN_CONFIG pointing at a directory — an OSError that is not permissions.
+
+    Pins that "present but unreadable" is the I/O *class* being announced, not
+    PermissionError specifically.
+    """
+    d = tmp_path / "config.json"
+    d.mkdir()
+    monkeypatch.setenv("MIEN_CONFIG", str(d))
+
+
+def test_statusline_says_so_on_a_config_it_cannot_open(tmp_path, monkeypatch):
+    _write_unopenable_cfg(tmp_path, monkeypatch)
+    result = _run("/flat/api", monkeypatch,
+                  remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout      # not a blank, silent segment
+    assert "🟢" not in result.stdout           # and not a healthy one either
+    assert result.stderr.strip() == ""
+    assert result.stdout.count("\n") == 1
+
+
+def test_statusline_says_so_when_the_config_path_is_a_directory(tmp_path, monkeypatch):
+    _point_cfg_at_a_directory(tmp_path, monkeypatch)
+    result = _run("/flat/api", monkeypatch,
+                  remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout
+
+
+def test_statusline_says_so_on_a_dangling_config_symlink(tmp_path, monkeypatch):
+    # ENOENT, like an absent config — but a symlink is something the operator
+    # put there on purpose, so this is a config whose target went missing, not
+    # an unconfigured machine. It must be announced, not passed off as silence.
+    link = tmp_path / "config.json"
+    link.symlink_to(tmp_path / "gone.json")
+    monkeypatch.setenv("MIEN_CONFIG", str(link))
+    result = _run("/flat/api", monkeypatch,
+                  remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "mien:config" in result.stdout
+
+
+def test_prompt_says_so_on_a_config_it_cannot_open(tmp_path, monkeypatch):
+    _write_unopenable_cfg(tmp_path, monkeypatch)
+    result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0  # a prompt command must never fail the shell
+    assert "mien:config" in result.stdout
+    assert "🟢" not in result.stdout
+    assert result.stderr == ""    # a prompt redraws constantly; stderr would spam
+    assert "\n" not in result.stdout
+
+
+def test_guard_fails_open_on_a_config_it_cannot_open_and_says_it_is_not_enforcing(
+        tmp_path, monkeypatch):
+    # The same pair of guarantees as the unparseable-config case, for a config
+    # mien cannot open: it must not wedge the commit, and it must not stop
+    # guarding in silence.
+    _write_unopenable_cfg(tmp_path, monkeypatch)
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "refusing" not in result.output
+    assert "NOT enforcing" in result.stderr
+    assert "config unreadable" in result.stderr
+    assert result.stdout == ""
+
+
+def test_guard_fails_open_when_the_config_path_is_a_directory(tmp_path, monkeypatch):
+    _point_cfg_at_a_directory(tmp_path, monkeypatch)
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "NOT enforcing" in result.stderr
+
+
+def test_an_absent_config_stays_silent_everywhere(tmp_path, monkeypatch):
+    # The regression the announcement must not cost: no config at all means mien
+    # is simply not set up here, which is not a failure. All three surfaces stay
+    # quiet — none of them may start reporting "unreadable" for a machine that
+    # never configured mien.
+    missing = tmp_path / "does-not-exist.json"
+    monkeypatch.setenv("MIEN_CONFIG", str(missing))
+
+    line = _run("/flat/api", monkeypatch,
+                remote="https://github.com/acme-core/api.git")
+    assert line.exit_code == 0
+    assert line.output.strip() == ""
+
+    prompt = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert prompt.exit_code == 0 and prompt.output == ""
+
+    guard = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                       remote="https://github.com/acme-core/api.git")
+    assert guard.exit_code == 0
+    assert guard.output == "" and guard.stderr == ""
 
 
 def test_statusline_remote_owner_beats_a_directory_scope(tmp_path, monkeypatch):

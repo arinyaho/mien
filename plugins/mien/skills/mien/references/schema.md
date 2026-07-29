@@ -20,17 +20,36 @@ Those five are the complete accepted top-level set; anything else is an error (s
 
 ## Backends
 
-- `gcp_secret_manager`: `{"type": "gcp_secret_manager", "project": "<gcp-project>"}`
-- `macos_keychain`: `{"type": "macos_keychain", "service_prefix": "mien-"}`
-- `keyring`: `{"type": "keyring", "service_prefix": "mien-"}` — Linux Secret Service / Windows Credential Locker; free, no cloud; requires a desktop session (does NOT work headless)
+`secrets_backend` carries a `type` plus exactly the options that backend reads — every required one present, nothing else alongside them.
+
+| type | required options | optional options | |
+| --- | --- | --- | --- |
+| `gcp_secret_manager` | `project` | — | GCP Secret Manager |
+| `macos_keychain` | — | `service_prefix` (default `mien-`) | macOS login keychain |
+| `keyring` | — | `service_prefix` (default `mien-`) | Linux Secret Service / Windows Credential Locker; free, no cloud; requires a desktop session (does NOT work headless) |
+
+```jsonc
+{ "type": "gcp_secret_manager", "project": "<gcp-project>" }
+{ "type": "macos_keychain", "service_prefix": "mien-" }
+{ "type": "keyring", "service_prefix": "mien-" }
+```
+
+An option this backend does not read (`"projct"`), or a required one that is missing (`project` under `gcp_secret_manager`), is a parse-time `ConfigError` naming the key — see below.
+
+**An unrecognized `type` is a different check with a different message**, and not this one: it is raised when a command actually needs the backend (`login`, `logout`, `sync`, `push`, `exec`, `run`, `doctor`), not while parsing, and a type mien has *retired* (`oci_vault`) gets the migration story — re-init on a supported backend and log in again, or install a mien old enough to still export what is stored there — rather than the "did you typo an option?" answer. Options are only checked against a type mien knows, so an unknown type is reported on its own terms instead of dragging a pile of "unknown option" noise along with it.
 
 ## Unknown keys are fatal
 
-A key mien does not recognize — at the top level, inside `secret_naming`, at profile level, inside any service block (`google`, `github`, a `slack` entry, `aws`, `oci`, `atlassian`, `notion`), or inside a `project_env` entry — is a hard error, not a dropped field. The load raises `ConfigError`, so *every* command that reads the config (`list`, `use`, `exec`, `run`, `which`, `whoami`, `doctor`, `statusline`, `guard`) exits 1 until the key is removed. One typo anywhere makes the whole config unusable, not just the profile it sits in.
+A key mien does not recognize — at the top level, inside `secrets_backend` (an option the declared backend does not read), inside `secret_naming`, at profile level, inside any service block (`google`, `github`, a `slack` entry, `aws`, `oci`, `atlassian`, `notion`), or inside a `project_env` entry — is a hard error, not a dropped field. So is a required key that is *missing*, including a required backend option. The load raises `ConfigError`, so one typo anywhere makes the whole config unusable until it is fixed — not just the profile it sits in.
 
 That blast radius is deliberate. Silently dropping the key is the quieter failure and the worse one: `"profles"` at the top level yields a config with *zero* profiles, so every identity disappears and `mien which` resolves to nothing; `"defalt"` in `secret_naming` reverts to the built-in template, so `mien login` writes secrets under a different name than the config declares and anything already stored under the intended name becomes unreachable; `"defualt_for"` discards a directory claim and the directory falls through to some other profile's catch-all glob; `"profil"` in an `aws` block leaves `AWS_PROFILE` unexported and the CLI falls back to its own default account. Nothing warns, the command succeeds, and it succeeds as the wrong person. A misconfigured identity has to fail loudly.
 
-The message names the offending key and lists the valid ones for that block, so the fix is mechanical. **When hand-editing, add only keys enumerated here — the five top-level keys above, `default` / `slack_token` inside `secret_naming`, and the profile and service keys below.**
+What "fail loudly" costs depends on what the command was about to do, and the two groups behave differently on purpose:
+
+- **Commands that act on an identity fail hard — exit 1.** `list`, `use`, `exec`, `run`, `which`, `whoami`, `login`, `logout`, `sync`, `push`, `env sync`, `claim`, `allow`, `token`, `doctor` — every command that loads the config in order to *do* something with it — print the parse error plus the config's path and stop. Acting on a config mien cannot understand is exactly how the wrong identity acts.
+- **The always-on display and gate surfaces fail open — exit 0 — but say so.** `mien statusline` and `mien prompt` print a compact red marker (`⚠ mien:config unreadable — run 'mien doctor'`, and `⚠mien:config` for the prompt) on **stdout**, where the identity segment would go, and exit 0: those two render their own stdout, so a message on stderr would leave the segment blank — and a status line that empties out reads as "nothing to report" when in fact mien can no longer tell who you are here. `mien guard` prints `mien: guard is NOT enforcing — config unreadable: <error>` on **stderr** and exits 0 — deliberately, so a broken config never wedges a commit, but never silently: a guard that has stopped guarding without admitting it is the worse failure. Neither surface refuses, and neither goes quiet.
+
+The message names the offending key and lists the valid ones for that block, so the fix is mechanical. **When hand-editing, add only keys enumerated here — the five top-level keys above, `type` plus that backend's own options from the table above, `default` / `slack_token` inside `secret_naming`, and the profile and service keys below.**
 
 Keys from older mien versions are tolerated by name, and only at the value that made their removal a no-op — an old config still loads:
 
@@ -60,7 +79,7 @@ Every profile-level key is optional; a service the profile omits (or sets to `nu
 | `owns_remotes` | array of strings | git-remote globs claiming identity |
 | `git_email` | string \| null | git author address for the cross-check |
 
-**Shapes are checked, not coerced.** A service block must be a JSON object, `slack` and `project_env` must be arrays of JSON objects, and `default_for` / `owns_remotes` must be arrays of strings. A wrong type is reported as a `ConfigError` naming the block — never coerced, and never allowed to escape as a `TypeError`, because the fail-open surfaces (`mien guard`, `mien statusline`) recognize only `ConfigError` as "I have stopped working" and would otherwise exit in silence.
+**Shapes are checked, not coerced.** A service block must be a JSON object, `slack` and `project_env` must be arrays of JSON objects, and `default_for` / `owns_remotes` must be arrays of strings. A wrong type is reported as a `ConfigError` naming the block — never coerced, and never allowed to escape as a `TypeError`, because the fail-open surfaces (`mien guard`, `mien statusline`, `mien prompt`) recognize only `ConfigError` as "I have stopped working" and would otherwise exit in silence.
 
 Within a block, a **missing required field** is the same class of error as an unknown one, reported with the block's valid key list.
 

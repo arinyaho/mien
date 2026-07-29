@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterable
+from dataclasses import MISSING, asdict, dataclass, field
 from dataclasses import fields as dc_fields
 from pathlib import Path
 
@@ -146,15 +147,42 @@ def deserialize_config(raw: str | dict) -> Config:
     # After the version check, not before: a config from a future schema should
     # be told its version is unsupported, rather than blamed for a key that
     # version legitimately added.
-    _check_top_level_keys(data)
+    _reject_unknown_keys(
+        "config", data, _TOP_LEVEL_KEYS, advertised=_TOP_LEVEL_KEYS_ADVERTISED)
     return _config_from_dict(data)
 
 
 def load_config() -> Config | None:
+    """Load the config, or None when mien is simply not set up here.
+
+    "Not set up" means nothing is at the path — and only that. A config that is
+    *there* but cannot be read (mode 0600 owned by another user, a directory in
+    `MIEN_CONFIG`, a dangling symlink, an I/O error, bytes that are not text) is
+    a ConfigError, not a None: the file is present and mien still cannot tell
+    which identity is which, which is exactly what ConfigError means.
+
+    Translated here rather than in each caller so every surface gets it at once
+    — the fail-open ones (status line, prompt, guard) recognize ConfigError as
+    "I have stopped working" and would otherwise swallow an OSError in their
+    catch-all and go quiet, and `_friendly_backend_message` renders it as an
+    actionable error instead of an OSError traceback.
+    """
     path = config_path()
-    if not path.exists():
-        return None
-    return deserialize_config(path.read_text())
+    try:
+        raw = path.read_text()
+    except FileNotFoundError as exc:
+        # A dangling symlink reports ENOENT too, but there the operator did put
+        # a config in place and its target has since gone — present-and-broken,
+        # not absent, so it is announced rather than passed off as unconfigured.
+        if not path.is_symlink():
+            return None
+        raise ConfigError(
+            f"config at {path} is a symlink to a file that does not exist"
+        ) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        raise ConfigError(f"cannot read config at {path}: {reason}") from exc
+    return deserialize_config(raw)
 
 
 def save_config(cfg: Config) -> None:
@@ -252,30 +280,65 @@ class ConfigError(ValueError):
     """
 
 
+def _reject_unknown_keys(
+    label: str,
+    data: dict,
+    known: Iterable[str],
+    *,
+    advertised: Iterable[str] | None = None,
+    tolerated: Iterable[str] = (),
+) -> None:
+    """Reject a key in one config block that mien does not recognize.
+
+    Every block gets the same treatment through this one function so the four
+    messages cannot drift apart: `label` names the block precisely (`config`,
+    `secret_naming`, `profile 'work'`, `profile 'work': project_env entry
+    '*/work'`, `profile 'work': aws`), and the message always names the offending
+    key and lists what is valid. `advertised` is the set the message suggests
+    when it differs from what is accepted -- an accepted alias should not be
+    recommended. `tolerated` is accepted silently and never advertised: keys an
+    older mien wrote that nothing reads any more.
+
+    Unrecognized means *rejected*, at every level, because every level has a way
+    to lose an identity in silence:
+
+    - top level: `"profles"` yields a config with zero profiles and no error, so
+      every identity vanishes and `mien which` resolves to nothing; `"bootstrp"`
+      empties the bootstrap account the GCP backend reports in its "you are
+      logged in as someone else" diagnostics.
+    - `secret_naming`: a typo'd template key falls back to the built-in
+      template, which changes *where secrets live* -- `mien login` writes under
+      the built-in name while the operator believes the config's name is in
+      force, and secrets already stored under the intended name become
+      unreachable.
+    - profile: `defualt_for` simply drops the directory claim, and the directory
+      then falls to some other profile's catch-all glob.
+    - `project_env` entry: `{"match": "*/work", "envs": {...}}` builds a scope
+      with an empty `env`, so the scope matches and exports nothing -- no
+      `AWS_PROFILE`, the tool falls back to its own default account, and the
+      command succeeds as somebody else.
+    - service block: a dropped `profile`/`ssh_key_path` leaves the service
+      unconfigured, with the same wrong-account ending.
+
+    Nothing warns in any of those cases, and the fail-open surfaces (`guard`,
+    `statusline`, `prompt`) stay silent too, so all of them fail loudly instead.
+    """
+    known = set(known)
+    tolerated = set(tolerated)
+    valid = ", ".join(sorted(known if advertised is None else set(advertised)))
+    for k in data:
+        if k in known or k in tolerated:
+            continue
+        raise ConfigError(f"{label}: unknown key {k!r}. Valid keys are: {valid}.")
+
+
 # Profile-level keys an older config may still carry. Tolerated by name alone,
 # whatever value they hold: `git_name` was never read by any code path, so a
 # config that set it to a real name was already getting nothing from it, and
 # rejecting such a config now would break configs that worked. Still an explicit
-# list rather than "drop anything unrecognized" — see `_check_profile_keys` for
+# list rather than "drop anything unrecognized" — see `_reject_unknown_keys` for
 # why an unknown profile key must fail loudly.
 _RETIRED_PROFILE_KEYS: frozenset[str] = frozenset({"git_name"})
-
-
-def _check_profile_keys(name: str, p: dict) -> None:
-    """Reject a profile key mien does not recognize.
-
-    A typo here is the quietest way to act as the wrong person: `defualt_for`
-    simply drops the directory claim, and the directory then falls to some other
-    profile's catch-all glob. Nothing warns, and the wrong identity acts.
-    """
-    known = {f.name for f in dc_fields(Profile)} - {"name"}
-    for k in p:
-        if k in known or k in _RETIRED_PROFILE_KEYS:
-            continue
-        raise ConfigError(
-            f"profile {name!r}: unknown key {k!r}. Valid keys are: "
-            f"{', '.join(sorted(known))}."
-        )
 
 
 # Top-level keys mien reads. `$schema_version` is the spelling `_config_to_dict`
@@ -293,61 +356,6 @@ _TOP_LEVEL_KEYS: frozenset[str] = frozenset({
 
 # What the error message advertises: the alias is accepted but not suggested.
 _TOP_LEVEL_KEYS_ADVERTISED: frozenset[str] = _TOP_LEVEL_KEYS - {"schema_version"}
-
-
-def _check_top_level_keys(data: dict) -> None:
-    """Reject a top-level config key mien does not recognize.
-
-    The quietest typo of all: `"profles"` yields a config with zero profiles and
-    no error, so every identity vanishes and `mien which` resolves to nothing;
-    `"bootstrp"` empties the bootstrap account the GCP backend reports in its
-    "you are logged in as someone else" diagnostics. Nothing raises, so the
-    fail-open surfaces (`guard`, `statusline`, `prompt`) stay silent too.
-    """
-    for k in data:
-        if k in _TOP_LEVEL_KEYS:
-            continue
-        raise ConfigError(
-            f"config: unknown top-level key {k!r}. Valid keys are: "
-            f"{', '.join(sorted(_TOP_LEVEL_KEYS_ADVERTISED))}."
-        )
-
-
-def _check_secret_naming_keys(sn: dict) -> None:
-    """Reject a secret_naming key mien does not recognize.
-
-    A typo'd template key falls back to the built-in template, which changes
-    *where secrets live*: `mien login` writes under the built-in name while the
-    operator believes the config's name is in force, and secrets already stored
-    under the intended name become unreachable. Silent in both directions, so it
-    fails loudly instead.
-    """
-    known = {f.name for f in dc_fields(SecretNaming)}
-    for k in sn:
-        if k in known:
-            continue
-        raise ConfigError(
-            f"secret_naming: unknown key {k!r}. Valid keys are: "
-            f"{', '.join(sorted(known))}."
-        )
-
-
-def _check_project_env_keys(name: str, entry: dict) -> None:
-    """Reject a project_env entry key mien does not recognize.
-
-    Same reason as `_check_profile_keys`, one level down: `{"match": "*/work",
-    "envs": {...}}` built a scope with an empty `env`, so the scope matched and
-    exported nothing. No `AWS_PROFILE`, the tool falls back to its own default
-    account, and the command succeeds as somebody else.
-    """
-    known = {f.name for f in dc_fields(ProjectEnvScope)}
-    for k in entry:
-        if k in known:
-            continue
-        raise ConfigError(
-            f"profile {name!r}: project_env entry {entry.get('match')!r} has "
-            f"unknown key {k!r}. Valid keys are: {', '.join(sorted(known))}."
-        )
 
 
 @dataclass(frozen=True)
@@ -401,10 +409,23 @@ _RETIRED_SERVICE_KEYS: dict[type, dict[str, _RetiredKey]] = {
                 "'gcloud_login_required:\n"
                 "    true' described. `gcloud` still runs under this profile's "
                 "config; what\n"
-                "    stops working is `mien token google` and `mien doctor "
+                "    stops working is `mien token google` and `mien whoami "
                 "--live`'s google\n"
                 "    probe, neither of which works for a gcloud-login-only profile "
-                "anyway."
+                "anyway.\n\n"
+                "    Nulling the ref also strands the secret it named. `mien logout "
+                "--service\n"
+                "    google` deletes that secret only when "
+                "'oauth_client_secret_ref' is set, and\n"
+                "    it drops the whole google block as it goes — so once the ref "
+                "is null the\n"
+                "    stored OAuth client secret stays in the backend with nothing "
+                "left pointing\n"
+                "    at it. Write the ref's current value down and delete that "
+                "secret from your\n"
+                "    backend yourself before you null the key, or accept the orphan "
+                "and clean it\n"
+                "    up later."
             ),
         ),
     },
@@ -425,7 +446,7 @@ _RETIRED_SERVICE_KEYS: dict[type, dict[str, _RetiredKey]] = {
 }
 
 
-def _service_from_dict(cls, data: dict):
+def _service_from_dict(cls, data: dict, label: str):
     """Build a service dataclass, tolerating only known-retired keys.
 
     A retired key is dropped when it holds the value that made it a no-op. Any
@@ -434,6 +455,13 @@ def _service_from_dict(cls, data: dict):
     carries that key's own remedy, because for a key whose capability was removed
     the obvious fix (delete it) *is* the silent behaviour change this raise
     exists to prevent.
+
+    `label` is the caller's own name for this block (`profile 'work': aws`,
+    `profile 'work': slack[1]`) and prefixes every message here, so a bad key
+    inside a service block reads like every other config error and names the
+    profile to go and edit. The dataclass name alone does not: with several
+    profiles carrying an `aws` block, `AWSService: ...` leaves the reader to
+    guess which one.
     """
     retired = _RETIRED_SERVICE_KEYS.get(cls, {})
     cleaned = {}
@@ -441,30 +469,63 @@ def _service_from_dict(cls, data: dict):
         if k in retired:
             if v != retired[k].no_op_value:
                 raise ConfigError(
-                    f"{cls.__name__}: {k!r}={v!r} is no longer supported "
+                    f"{label}: {k!r}={v!r} is no longer supported "
                     f"(only {retired[k].no_op_value!r} was ever written).\n\n"
                     f"{retired[k].remedy}"
                 )
             continue
         cleaned[k] = v
+    fields = dc_fields(cls)
+    _reject_unknown_keys(label, cleaned, {f.name for f in fields})
+    # A missing required field is the same class of error as an unknown one: the
+    # block is present, so it was meant to configure something, and half a block
+    # configures the wrong identity just as quietly as a typo'd key does. Named
+    # here rather than left to `cls(**cleaned)`, whose TypeError talks about
+    # positional arguments the config file does not have.
+    missing = [
+        f.name for f in fields
+        if f.name not in cleaned
+        and f.default is MISSING and f.default_factory is MISSING
+    ]
+    if missing:
+        raise ConfigError(
+            f"{label}: missing required key{'s' if len(missing) > 1 else ''} "
+            f"{', '.join(repr(m) for m in missing)}. Valid keys are: "
+            f"{', '.join(sorted(f.name for f in fields))}."
+        )
     try:
         return cls(**cleaned)
     except TypeError as exc:
-        # Almost always a typo. Name it and list what is valid, rather than
-        # letting a bare TypeError traceback out — this is the likelier way a
-        # hand-edited config goes wrong, so it deserves the clearer message.
-        known = ", ".join(f.name for f in dc_fields(cls))
+        # Unreachable while the checks above cover every way `cls(**cleaned)` can
+        # reject its arguments; kept as the backstop that holds the module's one
+        # invariant if a future dataclass grows a new one. Nothing may leave here
+        # as a bare TypeError: the fail-open surfaces recognize only ConfigError
+        # as "I have stopped working" and would exit in silence on anything else.
         raise ConfigError(
-            f"{cls.__name__}: {exc}. Valid keys are: {known}."
+            f"{label}: {exc}. Valid keys are: "
+            f"{', '.join(sorted(f.name for f in fields))}."
         ) from exc
 
 
-def _service_from_raw(cls, profile_name: str, key: str, value: object):
-    """Build an optional service block, checking its shape first."""
-    if not value:
+def _service_from_raw(cls, profile_name: str, key: str, p: dict):
+    """Build an optional service block, checking its shape first.
+
+    Absent-or-null means "this profile has no such service"; anything else is a
+    block to validate. Present-but-empty is *not* absent: `"google": {}` is a
+    truncated block, and short-circuiting on falsiness dropped the service
+    without a word — the profile then acts with no google at all, which is the
+    silent identity loss this parser exists to prevent. `{}` now goes through the
+    normal checks, so a service whose fields are all optional (`aws`, `oci`)
+    still parses and one with required fields reports what is missing. A
+    present-but-wrong-typed block (`"github": false`, `"aws": []`) reaches
+    `_mapping_from_raw` and keeps its shape error, which falsiness also used to
+    swallow.
+    """
+    value = p.get(key)
+    if value is None:
         return None
-    return _service_from_dict(
-        cls, _mapping_from_raw(f"profile {profile_name!r}: {key}", value))
+    label = f"profile {profile_name!r}: {key}"
+    return _service_from_dict(cls, _mapping_from_raw(label, value), label)
 
 
 def _config_from_dict(raw: dict) -> Config:
@@ -483,7 +544,7 @@ def _config_from_dict(raw: dict) -> Config:
     ensure_known_backend_options(secrets_backend)
 
     sn = _mapping_from_raw("secret_naming", raw.get("secret_naming") or {})
-    _check_secret_naming_keys(sn)
+    _reject_unknown_keys("secret_naming", sn, {f.name for f in dc_fields(SecretNaming)})
     secret_naming = SecretNaming(
         default=sn.get("default", "mien-{profile}-{service}-{kind}"),
         slack_token=sn.get("slack_token", "mien-{profile}-slack-{workspace}-token"),
@@ -492,23 +553,31 @@ def _config_from_dict(raw: dict) -> Config:
     profiles: dict[str, Profile] = {}
     for name, p in _mapping_from_raw("profiles", raw.get("profiles") or {}).items():
         p = _mapping_from_raw(f"profile {name!r}", p)
-        _check_profile_keys(name, p)
-        google = _service_from_raw(GoogleService, name, "google", p.get("google"))
-        github = _service_from_raw(GitHubService, name, "github", p.get("github"))
+        _reject_unknown_keys(
+            f"profile {name!r}", p,
+            {f.name for f in dc_fields(Profile)} - {"name"},
+            tolerated=_RETIRED_PROFILE_KEYS,
+        )
+        google = _service_from_raw(GoogleService, name, "google", p)
+        github = _service_from_raw(GitHubService, name, "github", p)
         slack = [
-            _service_from_dict(SlackWorkspace, w)
-            for w in _object_list_from_raw(f"profile {name!r}: slack", p.get("slack"))
+            _service_from_dict(SlackWorkspace, w, f"profile {name!r}: slack[{i}]")
+            for i, w in enumerate(
+                _object_list_from_raw(f"profile {name!r}: slack", p.get("slack")))
         ]
-        aws = _service_from_raw(AWSService, name, "aws", p.get("aws"))
-        oci = _service_from_raw(OCIService, name, "oci", p.get("oci"))
-        atlassian = _service_from_raw(AtlassianService, name, "atlassian", p.get("atlassian"))
-        notion = _service_from_raw(NotionService, name, "notion", p.get("notion"))
+        aws = _service_from_raw(AWSService, name, "aws", p)
+        oci = _service_from_raw(OCIService, name, "oci", p)
+        atlassian = _service_from_raw(AtlassianService, name, "atlassian", p)
+        notion = _service_from_raw(NotionService, name, "notion", p)
         project_env = []
         for s_ in _object_list_from_raw(f"profile {name!r}: project_env", p.get("project_env")):
             if "match" not in s_:
                 raise ConfigError(
                     f"profile {name!r}: a project_env entry has no 'match' glob: {s_!r}")
-            _check_project_env_keys(name, s_)
+            _reject_unknown_keys(
+                f"profile {name!r}: project_env entry {s_.get('match')!r}", s_,
+                {f.name for f in dc_fields(ProjectEnvScope)},
+            )
             project_env.append(ProjectEnvScope(
                 match=s_["match"],
                 env=dict(_mapping_from_raw(

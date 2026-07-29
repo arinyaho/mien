@@ -112,6 +112,21 @@ def test_git_identity_fields_survive_a_roundtrip(monkeypatch, tmp_path):
     assert Profile(name="p").git_email is None
 
 
+def _raw(profiles: dict) -> dict:
+    """A minimal loadable config carrying just the profiles under test."""
+    return {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+            "bootstrap": {}, "secret_naming": {}, "profiles": profiles}
+
+
+# A complete google block: every one of the seven keys is required when the block
+# is present, so tests that vary one key start from this.
+_GOOGLE = {
+    "email": "me@x.example", "oauth_client_id": "cid",
+    "oauth_client_secret_ref": "s", "refresh_token_ref": "r", "adc_ref": None,
+    "gcloud_config_name": "work", "default_project": None,
+}
+
+
 def test_retired_fields_in_an_older_config_are_ignored():
     raw = {
         "$schema_version": 1,
@@ -196,6 +211,39 @@ def test_a_retired_key_holding_a_meaningful_value_is_reported():
     assert "oauth_client_secret_ref' to null" in msg
 
 
+def _gcloud_login_required_remedy() -> str:
+    raw = {
+        "$schema_version": 1,
+        "secrets_backend": {"type": "keyring"},
+        "profiles": {"work": {"google": dict(_GOOGLE, gcloud_login_required=True)}},
+    }
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(raw)
+    return str(exc.value)
+
+
+def test_the_remedy_names_every_command_that_stops_working():
+    """The list of what nulling the ref costs is presented as exhaustive.
+
+    `mien logout --service google` guards its delete with
+    `if prof.google.oauth_client_secret_ref:`, so after following this remedy
+    logout stops deleting the stored OAuth client secret — and drops the google
+    block that recorded its name — leaving it in the backend forever. A remedy
+    that lists consequences has to list that one.
+    """
+    msg = _gcloud_login_required_remedy()
+    assert "mien token google" in msg
+    assert "mien logout --service" in msg
+    assert "orphan" in msg
+
+
+def test_the_remedy_points_at_a_command_that_exists():
+    """`mien doctor` takes only `--gc`; the live google probe is `mien whoami --live`."""
+    msg = _gcloud_login_required_remedy()
+    assert "doctor --live" not in msg.replace("\n", " ")
+    assert "whoami --live" in msg.replace("\n", " ")
+
+
 def test_a_retired_slack_key_holding_a_value_names_what_removing_it_costs():
     """`team_id` was only ever written as null, so a value here is hand-typed.
 
@@ -212,6 +260,107 @@ def test_a_retired_slack_key_holding_a_value_names_what_removing_it_costs():
     with pytest.raises(ConfigError, match="no longer supported") as exc:
         deserialize_config(raw)
     assert "deleting the key changes nothing" in str(exc.value)
+
+
+@pytest.mark.parametrize("profiles, expect", [
+    # A typo inside a service block has to name the profile like every other
+    # check does, not just the dataclass: with several profiles carrying an `aws`
+    # block, `AWSService: ...` leaves the reader to guess which one to edit.
+    ({"home": {"aws": {"region": "eu-west-1"}}, "work": {"aws": {"profil": "w"}}},
+     "profile 'work': aws: unknown key 'profil'."),
+    ({"work": {"github": {"username": "octo", "host": "github.com",
+                          "ssh_keypath": "/k"}}},
+     "profile 'work': github: unknown key 'ssh_keypath'."),
+    # A list entry has to name its index too, or nothing says which workspace.
+    ({"work": {"slack": [{"workspace": "a", "user_token_ref": "r"},
+                         {"workspac": "b", "user_token_ref": "r"}]}},
+     "profile 'work': slack[1]: unknown key 'workspac'."),
+])
+def test_a_service_block_key_error_names_the_profile(profiles, expect):
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw(profiles))
+    assert expect in str(exc.value)
+    assert "Valid keys are" in str(exc.value)
+
+
+@pytest.mark.parametrize("profiles, expect", [
+    ({"home": {"google": dict(_GOOGLE)},
+      "work": {"google": dict(_GOOGLE, gcloud_login_required=True)}},
+     "profile 'work': google: 'gcloud_login_required'=True"),
+    ({"work": {"slack": [{"workspace": "a", "user_token_ref": "r"},
+                         {"workspace": "b", "user_token_ref": "r",
+                          "team_id": "T0001"}]}},
+     "profile 'work': slack[1]: 'team_id'='T0001'"),
+])
+def test_a_retired_service_key_error_names_the_profile(profiles, expect):
+    """The retired-key report has the same job as the unknown-key one.
+
+    It tells the operator to go and edit a block, so it has to say which block —
+    the remedy for `gcloud_login_required` is a multi-step edit, and following it
+    on the wrong profile changes the wrong identity.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw(profiles))
+    assert expect in str(exc.value)
+    assert "no longer supported" in str(exc.value)
+
+
+def test_an_empty_service_block_is_validated_not_dropped():
+    """`"google": {}` is a truncated block, not "this profile has no google".
+
+    Reading it as falsy silently left the profile with no google at all: the
+    exact silent loss of an identity this parser exists to stop. It must be
+    validated like any other block, so its missing required fields are reported.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw({"work": {"google": {}}}))
+    msg = str(exc.value)
+    assert msg.startswith("profile 'work': google: missing required keys ")
+    assert "'email'" in msg and "'refresh_token_ref'" in msg
+    assert "Valid keys are" in msg
+
+
+def test_a_partial_service_block_names_the_one_field_it_is_missing():
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw({"work": {"github": {"username": "octo"}}}))
+    assert "profile 'work': github: missing required key 'host'." in str(exc.value)
+
+
+def test_an_empty_block_parses_when_every_field_is_optional():
+    """`aws` and `oci` are legitimately constructible from `{}`.
+
+    No "must be non-empty" rule is invented here: `{}` just goes through the
+    normal checks, and for these two there is nothing to complain about.
+    """
+    prof = deserialize_config(_raw({"work": {"aws": {}, "oci": {}}})).profiles["work"]
+    assert prof.aws is not None and prof.aws.region is None
+    assert prof.oci is not None and prof.oci.profile is None
+
+
+def test_a_null_service_block_still_means_no_such_service():
+    prof = deserialize_config(_raw({"work": {"github": None}})).profiles["work"]
+    assert prof.github is None
+
+
+def test_an_absent_service_block_still_means_no_such_service():
+    prof = deserialize_config(_raw({"work": {}})).profiles["work"]
+    assert (prof.github, prof.google, prof.aws, prof.oci) == (None, None, None, None)
+
+
+@pytest.mark.parametrize("profiles, expect", [
+    # Falsy non-objects used to slip past the `if not value` short-circuit and be
+    # read as "no such service" instead of keeping their shape error.
+    ({"work": {"github": False}}, "profile 'work': github must be a JSON object"),
+    ({"work": {"aws": []}}, "profile 'work': aws must be a JSON object"),
+    ({"work": {"notion": 0}}, "profile 'work': notion must be a JSON object"),
+    ({"work": {"atlassian": ""}}, "profile 'work': atlassian must be a JSON object"),
+    ({"work": {"slack": [None]}}, "profile 'work': slack[0] must be a JSON object"),
+    ({"work": {"slack": [{}]}}, "profile 'work': slack[0]: missing required keys"),
+])
+def test_a_present_but_unusable_service_block_is_reported(profiles, expect):
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw(profiles))
+    assert expect in str(exc.value)
 
 
 def test_save_creates_parent_dir_and_chmods_600(monkeypatch, tmp_path):
@@ -409,12 +558,12 @@ def test_default_for_missing_defaults_empty():
     # gone, `mien which` resolving to nothing, and no error anywhere.
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "profles": {"work": {}}}',
-     "unknown top-level key 'profles'"),
+     "config: unknown key 'profles'"),
     # `bootstrp` left the bootstrap account empty, so the GCP backend's
     # "you are logged in as someone else" diagnostic named nobody.
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "bootstrp": {"gcp_account": "me@example.com"}}',
-     "unknown top-level key 'bootstrp'"),
+     "config: unknown key 'bootstrp'"),
     # The sharpest one: a typo'd template silently reverts to the built-in name,
     # so `mien login` writes secrets somewhere other than the config says.
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
@@ -475,6 +624,17 @@ def test_both_schema_version_spellings_still_parse(version_key):
     cfg = deserialize_config(raw)
     assert cfg.schema_version == 1
     assert list(cfg.profiles) == ["work"]
+
+
+def test_the_top_level_error_advertises_only_the_canonical_version_spelling():
+    """Accepted is not the same as recommended: the alias is not suggested."""
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config({"$schema_version": 1,
+                            "secrets_backend": {"type": "keyring"},
+                            "profles": {}})
+    valid = str(exc.value).split("Valid keys are: ")[1].rstrip(".").split(", ")
+    assert valid == ["$schema_version", "bootstrap", "profiles", "secret_naming",
+                     "secrets_backend"]
 
 
 def test_every_top_level_key_mien_writes_is_accepted():

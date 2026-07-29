@@ -93,8 +93,11 @@ def _friendly_backend_message(exc: BaseException) -> str | None:
         return (
             f"{exc}\n\n"
             f"The config is at {config_path()}.\n"
-            "Until it parses, mien cannot tell which identity is which — so the "
-            "status line shows a warning in place of your identity, and `mien "
+            # "read", not "parse": a ConfigError also covers a config that is
+            # there but cannot be opened at all (permissions, a directory, a
+            # dangling symlink), where "until it parses" would misdirect.
+            "Until mien can read it, it cannot tell which identity is which — so "
+            "the status line shows a warning in place of your identity, and `mien "
             "guard` stops enforcing (it says so instead of blocking)."
         )
 

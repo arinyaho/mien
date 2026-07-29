@@ -612,6 +612,44 @@ def test_default_for_missing_defaults_empty():
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "profiles": {"work": {"project_env": [{"match": "*", "env": []}]}}}',
      r"profile 'work': project_env '\*' env must be a JSON object, got list"),
+    # An `env` map had its SHAPE checked and its CONTENTS trusted, while the
+    # sibling `match` two lines above was checked value and all. A non-string
+    # value reaches `ambient._emit_value` and dies on `.replace` as a bare
+    # AttributeError, which `env_sync_cmd` does not catch and `MienGroup` does
+    # not translate: `mien env sync` exits 1 with both streams empty. An
+    # unquoted number is the likeliest hand-edit of the four.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env":'
+     ' [{"match": "*/work", "env": {"PORT": 8080}}]}}}',
+     r"project_env '\*/work' env: 'PORT' must be a string, got int: 8080"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env":'
+     ' [{"match": "*/work", "env": {"AWS_PROFILE": null}}]}}}',
+     r"project_env '\*/work' env: 'AWS_PROFILE' must be a string, got NoneType"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env":'
+     ' [{"match": "*/work", "env": {"PATH_PARTS": ["/a", "/b"]}}]}}}',
+     r"project_env '\*/work' env: 'PATH_PARTS' must be a string, got list"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env":'
+     ' [{"match": "*/work", "env": {"AWS": {"profile": "work"}}}]}}}',
+     r"project_env '\*/work' env: 'AWS' must be a string, got dict"),
+    # Keys are checked for the same reason, one gate further out: `zsh -n`
+    # *parses* `export 2FA="x"` — "not an identifier" is a run-time error — so
+    # `assert_parses` passes, the file is written, and sourcing it abandons
+    # every remaining export in `ambient.zsh`, other profiles' scopes included.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env":'
+     ' [{"match": "*/work", "env": {"2FA": "on"}}]}}}',
+     r"project_env '\*/work' env: '2FA' is not a usable environment variable name"),
+    # Quieter still: `export AWS PROFILE="work"` is valid zsh that exports `AWS`
+    # empty and `PROFILE=work`, so the variable the operator wrote is never set
+    # and nothing anywhere says so.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env":'
+     ' [{"match": "*/work", "env": {"AWS PROFILE": "work"}}]}}}',
+     r"project_env '\*/work' env: 'AWS PROFILE' is not a usable environment "
+     r"variable name"),
     # Falsy scalars too — `0`/`false`/`""` are all "present and wrong-typed".
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "profiles": 0}',
@@ -674,6 +712,40 @@ def test_an_absent_or_empty_project_env_env_still_means_no_exports():
            ]}}}
     scopes = deserialize_config(raw).profiles["work"].project_env
     assert [(s.match, s.env) for s in scopes] == [("*/absent", {}), ("*/empty", {})]
+
+
+def test_string_env_values_including_empty_and_references_still_parse():
+    """Checking `env`'s values must not narrow what a working config may say.
+
+    Both of the interesting strings are legitimate against `mien.ambient`: an
+    empty one emits `export X=""`, which is how you export a deliberately empty
+    variable, and a `$VAR` one is the whole point of `_emit_value`'s double
+    quoting — "the value IS evaluated by zsh (that is how references work)".
+    Only the TYPE is being constrained here, never the content.
+    """
+    raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+           "profiles": {"work": {"project_env": [
+               {"match": "*/work", "env": {
+                   "AWS_PROFILE": "work",
+                   "GIT_PAGER": "",
+                   "WORK_ROOT": "$HOME/work",
+                   "PATH": "${HOME}/bin:$PATH",
+                   "_LEADING_UNDERSCORE": "1",
+                   "PY3_PATH": "$HOME/x/src",
+               }},
+           ]}}}
+    scope = deserialize_config(raw).profiles["work"].project_env[0]
+    assert scope.env == {
+        "AWS_PROFILE": "work",
+        "GIT_PAGER": "",
+        "WORK_ROOT": "$HOME/work",
+        "PATH": "${HOME}/bin:$PATH",
+        "_LEADING_UNDERSCORE": "1",
+        "PY3_PATH": "$HOME/x/src",
+    }
+    # And what those values become is still a script zsh accepts.
+    from mien.ambient import assert_parses, render_ambient
+    assert_parses(render_ambient(deserialize_config(raw).profiles))
 
 
 def test_an_explicitly_null_block_is_absence_not_a_wrong_type():

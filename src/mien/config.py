@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterable
 from dataclasses import MISSING, asdict, dataclass, field
 from dataclasses import fields as dc_fields
@@ -346,6 +347,58 @@ def _object_list_from_raw(where: str, value: object) -> list[dict]:
             f"{type(value).__name__}: {value!r}"
         )
     return [_mapping_from_raw(f"{where}[{i}]", item) for i, item in enumerate(value)]
+
+
+# What may stand on the left of `export NAME=...`. Deliberately ASCII-only and
+# stricter than `str.isidentifier()` (which accepts `café` and other non-ASCII
+# names): this describes what a shell will take, not what Python will.
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _env_map_from_raw(where: str, value: object) -> dict[str, str]:
+    """Validate a ``project_env`` entry's ``env`` map -- shape, keys AND values.
+
+    ``_optional_mapping_from_raw`` establishes only that the block is a JSON
+    object. Every pair inside it is then written into ``ambient.zsh`` verbatim as
+    ``export <key>=<value>`` (``mien.ambient._scope_block``), so both halves have
+    to be checked here, for the same reason the sibling ``match`` goes through
+    ``_glob_string`` rather than being trusted:
+
+    - A non-string VALUE dies in ``ambient._emit_value`` as a bare
+      ``AttributeError`` (``.replace`` on an int), which ``env_sync_cmd`` does
+      not catch and ``MienGroup`` does not translate: ``mien env sync`` exits 1
+      with nothing on stdout or stderr. An unquoted number (``{"PORT": 8080}``)
+      is a plausible hand-edit, and the packaged schema declares this field
+      ``dict[str, str]``.
+    - A KEY that is not a shell identifier survives every gate downstream.
+      ``zsh -n`` PARSES ``export 2FA="x"`` (it is a run-time error, not a syntax
+      one), so ``assert_parses`` passes and the file is written -- and then
+      sourcing it fails at that line with ``not an identifier`` and ABANDONS THE
+      REST OF THE FILE: every later export, including every other profile's
+      scopes, silently never happens. A key with a space is quieter still --
+      ``export MY VAR="x"`` is valid syntax that exports ``MY`` empty and
+      ``VAR="x"``, so the variable the operator wrote is never set. Neither says
+      a word anywhere, which is the wrong-account-in-silence ending this parser
+      exists to prevent.
+
+    A non-string key cannot come from JSON, whose keys are always strings, but
+    ``deserialize_config`` also accepts an already-parsed ``dict``; the
+    ``isinstance`` here is what keeps the check itself from dying on one.
+    """
+    env = _optional_mapping_from_raw(where, value)
+    for key, item in env.items():
+        if not isinstance(key, str) or not _ENV_NAME_RE.fullmatch(key):
+            raise ConfigError(
+                f"{where}: {key!r} is not a usable environment variable name. "
+                f"Expected letters, digits and underscores, not starting with a "
+                f"digit (e.g. 'AWS_PROFILE')."
+            )
+        if not isinstance(item, str):
+            raise ConfigError(
+                f"{where}: {key!r} must be a string, got "
+                f"{type(item).__name__}: {item!r}"
+            )
+    return dict(env)
 
 
 # The JSON types a leaf config value can be annotated with, and how a message
@@ -793,9 +846,9 @@ def _config_from_dict(raw: dict) -> Config:
             )
             project_env.append(ProjectEnvScope(
                 match=match,
-                env=dict(_optional_mapping_from_raw(
+                env=_env_map_from_raw(
                     f"profile {name!r}: project_env {match!r} env",
-                    s_.get("env"))),
+                    s_.get("env")),
             ))
         profiles[name] = Profile(
             name=name,

@@ -1,20 +1,46 @@
 from __future__ import annotations
 
-from mien.config import BackendConfig, config_path
+from typing import NamedTuple
+
+from mien.config import BackendConfig, ConfigError, config_path
 
 from .base import BackendError, BackendUnauthorized, SecretNotFound, SecretsBackend
 
 __all__ = [
+    "BACKEND_OPTIONS",
     "BackendError",
+    "BackendOptionSpec",
     "BackendUnauthorized",
     "SecretNotFound",
     "SecretsBackend",
     "UnknownBackendType",
     "ensure_known_backend",
+    "ensure_known_backend_options",
     "load_backend",
 ]
 
-SUPPORTED_BACKENDS = ("gcp_secret_manager", "macos_keychain", "keyring")
+
+class BackendOptionSpec(NamedTuple):
+    """The option keys one backend reads out of `secrets_backend`.
+
+    `required` is what `load_backend` indexes directly (a missing one is a
+    `KeyError` at first use); `optional` is what it reads with a default.
+    """
+
+    required: tuple[str, ...] = ()
+    optional: tuple[str, ...] = ()
+
+
+# The option contract of every backend, kept here rather than in config.py so
+# a backend's keys are declared next to the loader that reads them. config.py
+# validates a parsed config against this (see `ensure_known_backend_options`).
+BACKEND_OPTIONS: dict[str, BackendOptionSpec] = {
+    "gcp_secret_manager": BackendOptionSpec(required=("project",)),
+    "macos_keychain": BackendOptionSpec(optional=("service_prefix",)),
+    "keyring": BackendOptionSpec(optional=("service_prefix",)),
+}
+
+SUPPORTED_BACKENDS = tuple(BACKEND_OPTIONS)
 
 # Backend types an older mien could write into a config but that no longer
 # exist here. Named explicitly so a config carrying one gets the migration
@@ -58,6 +84,39 @@ def ensure_known_backend(cfg: BackendConfig) -> None:
         f"Fix `secrets_backend.type` in {config_path()}, or run `mien init` to "
         f"write a fresh config."
     )
+
+
+def ensure_known_backend_options(cfg: BackendConfig) -> None:
+    """Reject a `secrets_backend` option key this backend does not read.
+
+    `type` already fails loudly when it is missing or unknown; without this the
+    keys beside it were swept into `options` unchecked, so `"projct": "x"` parsed
+    clean and surfaced later as a bare `KeyError: 'project'` out of
+    `load_backend` — from `mien doctor`, the command mien's own markers tell you
+    to run. A typo in the backend's options is a config error like any other, so
+    it is reported at parse time, by key name, as a `ConfigError`.
+
+    An unknown `type` is not this function's business: it is left to
+    `ensure_known_backend`, which has the migration story.
+    """
+    spec = BACKEND_OPTIONS.get(cfg.type)
+    if spec is None:
+        return
+    valid = spec.required + spec.optional
+    for key in cfg.options:
+        if key not in valid:
+            listed = ", ".join(valid) if valid else "(none)"
+            raise ConfigError(
+                f"secrets_backend: unknown option {key!r} for backend "
+                f"{cfg.type!r}. Valid options: {listed}."
+            )
+    for key in spec.required:
+        if key not in cfg.options:
+            raise ConfigError(
+                f"secrets_backend: backend {cfg.type!r} requires option {key!r}, "
+                f"which is missing — mien cannot reach your secrets without it. "
+                f"Add it, or run `mien init` to write a fresh config."
+            )
 
 
 def load_backend(cfg: BackendConfig) -> SecretsBackend:

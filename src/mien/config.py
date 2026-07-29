@@ -274,16 +274,96 @@ def _check_profile_keys(name: str, p: dict) -> None:
         )
 
 
-# Keys a service block may still carry from an older mien, and the value each
-# one had to hold for its removal to be a no-op. Deliberately an explicit map
-# rather than "drop anything unrecognized": an unknown key is far more likely a
-# typo (`profil`, `ssh_keypath`) than a retired field, and silently dropping it
-# would leave the service unconfigured — no `AWS_PROFILE`/`OCI_CLI_PROFILE`
-# exported, the tool falling back to its own default account, and the command
-# succeeding as somebody else. A misconfigured identity has to fail loudly.
-_RETIRED_SERVICE_KEYS: dict[type, dict[str, object]] = {
-    GoogleService: {"gcloud_login_required": False},
-    SlackWorkspace: {"team_id": None},
+def _check_project_env_keys(name: str, entry: dict) -> None:
+    """Reject a project_env entry key mien does not recognize.
+
+    Same reason as `_check_profile_keys`, one level down: `{"match": "*/work",
+    "envs": {...}}` built a scope with an empty `env`, so the scope matched and
+    exported nothing. No `AWS_PROFILE`, the tool falls back to its own default
+    account, and the command succeeds as somebody else.
+    """
+    known = {f.name for f in dc_fields(ProjectEnvScope)}
+    for k in entry:
+        if k in known:
+            continue
+        raise ConfigError(
+            f"profile {name!r}: project_env entry {entry.get('match')!r} has "
+            f"unknown key {k!r}. Valid keys are: {', '.join(sorted(known))}."
+        )
+
+
+@dataclass(frozen=True)
+class _RetiredKey:
+    """A service key an older mien wrote, and what deleting it costs today.
+
+    `no_op_value` is the value the key had to hold for its removal to change
+    nothing. `remedy` is the part the caller cannot guess: a retirement that
+    removed a *capability* makes "just delete the key" a behaviour change, so
+    each key has to spell out what deleting it does and how to get the old
+    behaviour back. "Remove it from your config" is only honest advice when the
+    key really was inert.
+    """
+
+    no_op_value: object
+    remedy: str
+
+
+# Keys a service block may still carry from an older mien. Deliberately an
+# explicit map rather than "drop anything unrecognized": an unknown key is far
+# more likely a typo (`profil`, `ssh_keypath`) than a retired field, and silently
+# dropping it would leave the service unconfigured — no
+# `AWS_PROFILE`/`OCI_CLI_PROFILE` exported, the tool falling back to its own
+# default account, and the command succeeding as somebody else. A misconfigured
+# identity has to fail loudly.
+_RETIRED_SERVICE_KEYS: dict[type, dict[str, _RetiredKey]] = {
+    GoogleService: {
+        "gcloud_login_required": _RetiredKey(
+            no_op_value=False,
+            remedy=(
+                "The ADC suppression it controlled has been removed from mien: "
+                "nothing reads\n"
+                "this key any more, and there is no other setting you might have "
+                "meant.\n\n"
+                "Deleting the key is therefore not a no-op. mien would start "
+                "writing an\n"
+                "ephemeral ADC file for this profile and exporting "
+                "GOOGLE_APPLICATION_CREDENTIALS\n"
+                "— the export this profile asked it not to make.\n\n"
+                "To move forward:\n"
+                "  - If that export is fine, delete 'gcloud_login_required' and "
+                "nothing else\n"
+                "    changes.\n"
+                "  - To keep this profile ADC-free, delete 'gcloud_login_required' "
+                "AND set this\n"
+                "    google block's 'oauth_client_secret_ref' to null. mien writes "
+                "an ADC only\n"
+                "    when both 'oauth_client_secret_ref' and 'refresh_token_ref' "
+                "are set, so\n"
+                "    clearing it leaves the gcloud-login-only google that "
+                "'gcloud_login_required:\n"
+                "    true' described. `gcloud` still runs under this profile's "
+                "config; what\n"
+                "    stops working is `mien token google` and `mien doctor "
+                "--live`'s google\n"
+                "    probe, neither of which works for a gcloud-login-only profile "
+                "anyway."
+            ),
+        ),
+    },
+    SlackWorkspace: {
+        "team_id": _RetiredKey(
+            no_op_value=None,
+            remedy=(
+                "Nothing has ever read it — mien addresses a workspace by its "
+                "'workspace' label —\n"
+                "so deleting the key changes nothing. mien only ever wrote it as "
+                "null, so a real\n"
+                "team id here was typed by hand: check it was not meant to be a "
+                "different key\n"
+                "(valid keys: workspace, user_token_ref) before you delete it."
+            ),
+        ),
+    },
 }
 
 
@@ -292,17 +372,20 @@ def _service_from_dict(cls, data: dict):
 
     A retired key is dropped when it holds the value that made it a no-op. Any
     other value meant something once, so it is reported rather than ignored —
-    silently discarding it would change behaviour without saying so.
+    silently discarding it would change behaviour without saying so. The report
+    carries that key's own remedy, because for a key whose capability was removed
+    the obvious fix (delete it) *is* the silent behaviour change this raise
+    exists to prevent.
     """
     retired = _RETIRED_SERVICE_KEYS.get(cls, {})
     cleaned = {}
     for k, v in data.items():
         if k in retired:
-            if v != retired[k]:
+            if v != retired[k].no_op_value:
                 raise ConfigError(
                     f"{cls.__name__}: {k!r}={v!r} is no longer supported "
-                    f"(only {retired[k]!r} was ever written). Remove it from your "
-                    "config, or check whether you meant a different setting."
+                    f"(only {retired[k].no_op_value!r} was ever written).\n\n"
+                    f"{retired[k].remedy}"
                 )
             continue
         cleaned[k] = v
@@ -335,6 +418,11 @@ def _config_from_dict(raw: dict) -> Config:
             "keyring.")
     sb_type = sb_raw.pop("type")
     secrets_backend = BackendConfig(type=sb_type, options=sb_raw)
+    # Imported here, not at module scope: `mien.backends` imports this module, so
+    # a top-level import would be a cycle. By parse time it is already loadable,
+    # and the module is cheap — every concrete backend inside it is lazy.
+    from mien.backends import ensure_known_backend_options
+    ensure_known_backend_options(secrets_backend)
 
     sn = _mapping_from_raw("secret_naming", raw.get("secret_naming") or {})
     secret_naming = SecretNaming(
@@ -361,6 +449,7 @@ def _config_from_dict(raw: dict) -> Config:
             if "match" not in s_:
                 raise ConfigError(
                     f"profile {name!r}: a project_env entry has no 'match' glob: {s_!r}")
+            _check_project_env_keys(name, s_)
             project_env.append(ProjectEnvScope(
                 match=s_["match"],
                 env=dict(_mapping_from_raw(

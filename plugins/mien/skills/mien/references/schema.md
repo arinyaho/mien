@@ -10,7 +10,7 @@ Top level:
   "secrets_backend": { "type": "...", /* options */ },
   "bootstrap": { /* optional, backend-specific */ },
   "secret_naming": { "default": "...", "slack_token": "..." },
-  "profiles": { "<name>": { "google": {...}|null, "github": {...}|null, "slack": [...] } }
+  "profiles": { "<name>": { /* see Profile blocks */ } }
 }
 ```
 
@@ -20,9 +20,45 @@ Top level:
 - `macos_keychain`: `{"type": "macos_keychain", "service_prefix": "mien-"}`
 - `keyring`: `{"type": "keyring", "service_prefix": "mien-"}` — Linux Secret Service / Windows Credential Locker; free, no cloud; requires a desktop session (does NOT work headless)
 
+## Unknown keys are fatal
+
+A key mien does not recognize — at profile level, or inside any service block (`google`, `github`, a `slack` entry, `aws`, `oci`, `atlassian`, `notion`) — is a hard error, not a dropped field. The load raises `ConfigError`, so *every* command that reads the config (`list`, `use`, `exec`, `run`, `which`, `whoami`, `doctor`, `statusline`, `guard`) exits 1 until the key is removed. One typo anywhere makes the whole config unusable, not just the profile it sits in.
+
+That blast radius is deliberate. Silently dropping the key is the quieter failure and the worse one: `"defualt_for"` discards the directory claim and the directory falls through to some other profile's catch-all glob; `"profil"` in an `aws` block leaves `AWS_PROFILE` unexported and the CLI falls back to its own default account. Nothing warns, the command succeeds, and it succeeds as the wrong person. A misconfigured identity has to fail loudly.
+
+The message names the offending key and lists the valid ones for that block, so the fix is mechanical. **When hand-editing a profile, add only keys enumerated below.**
+
+Keys from older mien versions are tolerated by name, and only at the value that made their removal a no-op — an old config still loads:
+
+| key | where | tolerated value |
+| --- | --- | --- |
+| `git_name` | profile | any (no code path ever read it) |
+| `gcloud_login_required` | `google` | `false` |
+| `team_id` | `slack` entry | `null` |
+
+Any *other* value for `gcloud_login_required` / `team_id` is an error rather than a silent drop: it meant something once, so discarding it would change behaviour without saying so.
+
 ## Profile blocks
 
-All three are optional per profile.
+Every profile-level key is optional; a service the profile omits (or sets to `null`) simply does not exist for it. This is the complete accepted set:
+
+| key | type | |
+| --- | --- | --- |
+| `google` | object \| null | Google account (Gmail/Calendar/Drive + GCP) |
+| `github` | object \| null | GitHub account |
+| `slack` | array of objects | zero or more workspaces |
+| `aws` | object \| null | AWS credentials or named profile |
+| `oci` | object \| null | OCI CLI profile |
+| `atlassian` | object \| null | Jira/Confluence account |
+| `notion` | object \| null | Notion integration token |
+| `project_env` | array of objects | ambient env by directory |
+| `default_for` | array of strings | directory globs claiming identity |
+| `owns_remotes` | array of strings | git-remote globs claiming identity |
+| `git_email` | string \| null | git author address for the cross-check |
+
+**Shapes are checked, not coerced.** A service block must be a JSON object, `slack` and `project_env` must be arrays of JSON objects, and `default_for` / `owns_remotes` must be arrays of strings. A wrong type is reported as a `ConfigError` naming the block — never coerced, and never allowed to escape as a `TypeError`, because the fail-open surfaces (`mien guard`, `mien statusline`) recognize only `ConfigError` as "I have stopped working" and would otherwise exit in silence.
+
+Within a block, a **missing required field** is the same class of error as an unknown one, reported with the block's valid key list.
 
 ### `google`
 ```jsonc
@@ -37,20 +73,70 @@ All three are optional per profile.
 }
 ```
 
+All seven keys are required when the block is present. The three nullable ones (`oauth_client_secret_ref`, `adc_ref`, `default_project`) may hold `null`, but the key itself must still be there.
+
 ### `github`
 ```jsonc
-{ "username": "...", "host": "github.com", "token_ref": "<backend-ref>" }
+{
+  "username": "...",
+  "host": "github.com",
+  "token_ref":     "<backend-ref>|null",   // optional
+  "ssh_key_path":  "<path>|null",          // optional
+  "ssh_key_ref":   "<backend-ref>|null"    // optional
+}
 ```
+
+`username` and `host` are required. `ssh_key_ref` (key contents in the backend, materialized per-shell) takes precedence over `ssh_key_path` (a static on-device key file).
 
 ### `slack` (array)
 ```jsonc
 [{ "workspace": "team-a", "user_token_ref": "<backend-ref>" }]
 ```
 
+Both keys are required in each entry.
+
+### `aws`
+```jsonc
+{
+  "region":                  "..."|null,
+  "profile":                 "..."|null,
+  "access_key_id_ref":       "<backend-ref>|null",
+  "secret_access_key_ref":   "<backend-ref>|null"
+}
+```
+
+All four are optional — the block may carry a named `~/.aws/config` profile, static keys from the backend, or both.
+
+### `oci`
+```jsonc
+{ "profile": "..."|null, "config_file": "<path>|null" }
+```
+
+Both optional.
+
+### `atlassian`
+```jsonc
+{ "email": "...", "base_url": "https://<site>.atlassian.net", "api_token_ref": "<backend-ref>" }
+```
+
+All three are required. Atlassian Cloud is HTTP Basic (`email:token`), so the email is part of the credential, not decoration.
+
 ### `notion`
 ```jsonc
 { "api_token_ref": "<backend-ref>" }
 ```
+
+Required when the block is present.
+
+### `git_email`
+
+The git author address a commit under this identity carries. Hand-edited, like `default_for` / `owns_remotes`.
+
+```jsonc
+"git_email": "me@acme.example"
+```
+
+Setting git's own `user.email` is git's job (native `includeIf`); mien reads `git_email` only for the author cross-check, so `mien guard` and the status line can warn when a commit's `user.email` disagrees with the identity acting here. Set it when you commit under an address none of the profile's accounts carry.
 
 ### `default_for` (array)
 
@@ -126,6 +212,8 @@ renders every profile's scopes into `~/.config/mien/ambient.zsh` as
 ```jsonc
 [{ "match": "*/work/acme", "env": { "AWS_PROFILE": "work" } }]
 ```
+
+Each entry must be a JSON object carrying a `match` glob; `env` is optional and must itself be an object of plain values. `match` and `env` are the only accepted keys — an entry with no `match`, or one carrying any other key, is a `ConfigError`. The unknown-key rule matters most here: a typo'd `env` would otherwise leave the scope exporting nothing, so the directory silently falls back to whatever account the underlying CLI defaults to.
 
 `match` follows the same directory-glob rules as `default_for` (the directory
 itself and everything under it; a trailing `/*` or `/` is normalized away).

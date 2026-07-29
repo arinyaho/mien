@@ -182,8 +182,36 @@ def test_a_retired_key_holding_a_meaningful_value_is_reported():
             "default_project": None, "gcloud_login_required": True,
         }}},
     }
-    with pytest.raises(ValueError, match="no longer supported"):
+    with pytest.raises(ValueError, match="no longer supported") as exc:
         deserialize_config(raw)
+    msg = str(exc.value)
+    # The remedy must not be "remove it, or you meant something else": both of
+    # those *are* the silent behaviour change this raise exists to prevent. The
+    # reader of `gcloud_login_required` is gone, so deleting the key starts the
+    # ADC export for the one profile that asked for no ADC, and there is no other
+    # setting to have meant. So the message has to name the consequence and the
+    # way to keep the old behaviour.
+    assert "GOOGLE_APPLICATION_CREDENTIALS" in msg
+    assert "not a no-op" in msg
+    assert "oauth_client_secret_ref' to null" in msg
+
+
+def test_a_retired_slack_key_holding_a_value_names_what_removing_it_costs():
+    """`team_id` was only ever written as null, so a value here is hand-typed.
+
+    Unlike `gcloud_login_required` nothing ever read it, so the message may say
+    "deleting it changes nothing" — but it still has to say that, rather than
+    leaving the reader to guess whether a delete is safe.
+    """
+    raw = {
+        "$schema_version": 1,
+        "secrets_backend": {"type": "keyring"},
+        "profiles": {"work": {"slack": [
+            {"workspace": "team-a", "user_token_ref": "r", "team_id": "T0001"}]}},
+    }
+    with pytest.raises(ConfigError, match="no longer supported") as exc:
+        deserialize_config(raw)
+    assert "deleting the key changes nothing" in str(exc.value)
 
 
 def test_save_creates_parent_dir_and_chmods_600(monkeypatch, tmp_path):
@@ -356,6 +384,27 @@ def test_default_for_missing_defaults_empty():
     ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
      ' "profiles": {"work": {"project_env": [{"match": "*", "env": "A=1"}]}}}',
      "profile 'work': project_env '\\*' env must be a JSON object"),
+    # A mistyped backend option used to be swept into `options` unchecked and
+    # escape much later as a bare `KeyError: 'project'` out of `load_backend` —
+    # from `mien doctor`, the command mien's own markers tell you to run.
+    ('{"$schema_version": 1,'
+     ' "secrets_backend": {"type": "gcp_secret_manager", "projct": "x"}}',
+     "unknown option 'projct'"),
+    ('{"$schema_version": 1, "secrets_backend": {"type": "gcp_secret_manager"}}',
+     "requires option 'project'"),
+    ('{"$schema_version": 1,'
+     ' "secrets_backend": {"type": "keyring", "servce_prefix": "mien-"}}',
+     "unknown option 'servce_prefix'"),
+    ('{"$schema_version": 1,'
+     ' "secrets_backend": {"type": "macos_keychain", "project": "p"}}',
+     "unknown option 'project'"),
+    # `envs` builds a scope that matches and exports nothing: no AWS_PROFILE, the
+    # tool falls back to its own default account, the command runs as somebody
+    # else. Same class of failure as a mistyped profile key, same treatment.
+    ('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+     ' "profiles": {"work": {"project_env":'
+     ' [{"match": "*/work", "envs": {"AWS_PROFILE": "work"}}]}}}',
+     "unknown key 'envs'"),
 ])
 def test_every_way_a_config_breaks_is_a_configerror(raw, expect):
     """One type for every parse failure, so the CLI can report them all.
@@ -366,6 +415,46 @@ def test_every_way_a_config_breaks_is_a_configerror(raw, expect):
     """
     with pytest.raises(ConfigError, match=expect):
         deserialize_config(raw)
+
+
+@pytest.mark.parametrize("backend", [
+    {"type": "gcp_secret_manager", "project": "p1"},
+    {"type": "macos_keychain"},
+    {"type": "macos_keychain", "service_prefix": "acme-"},
+    {"type": "keyring"},
+    {"type": "keyring", "service_prefix": "acme-"},
+])
+def test_valid_backend_options_are_still_accepted(backend):
+    """Option checking must not reject a config that works today."""
+    raw = {"$schema_version": 1, "secrets_backend": backend, "profiles": {}}
+    cfg = deserialize_config(raw)
+    assert cfg.secrets_backend.type == backend["type"]
+    assert cfg.secrets_backend.options == {
+        k: v for k, v in backend.items() if k != "type"}
+
+
+def test_an_unrecognized_backend_type_keeps_its_own_error():
+    """Option checking must not steal the migration story from a retired type.
+
+    `oci_vault` has secrets stranded in it; `ensure_known_backend` is what says
+    so. Parsing has to get out of the way and let the caller reach that message.
+    """
+    raw = {"$schema_version": 1,
+           "secrets_backend": {"type": "oci_vault", "vault_ocid": "ocid1..."},
+           "profiles": {}}
+    cfg = deserialize_config(raw)
+    assert cfg.secrets_backend.options == {"vault_ocid": "ocid1..."}
+
+
+def test_project_env_entry_with_only_known_keys_is_accepted():
+    raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+           "profiles": {"work": {"project_env": [
+               {"match": "*/work", "env": {"AWS_PROFILE": "work"}},
+               {"match": "*/solo"},
+           ]}}}
+    scopes = deserialize_config(raw).profiles["work"].project_env
+    assert [(s.match, s.env) for s in scopes] == [
+        ("*/work", {"AWS_PROFILE": "work"}), ("*/solo", {})]
 
 
 def test_a_retired_profile_key_still_loads():

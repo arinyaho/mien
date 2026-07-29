@@ -1,4 +1,5 @@
 import json
+import re
 
 from click.testing import CliRunner
 
@@ -321,6 +322,20 @@ def _run_guard(cwd, monkeypatch, mien_profile=None, remote=None, author_email=No
     return CliRunner().invoke(main, args)
 
 
+def _write_broken_cfg(tmp_path, monkeypatch):
+    """A config that exists but does not parse — the fail-open surfaces' hard case.
+
+    Not "mien is unconfigured" (that is a missing file, and silence is right):
+    the file is there and mien can no longer read who you are from it.
+    """
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{ not json")
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _run_prompt(cwd, monkeypatch, mien_profile=None, remote=None, author_email=None):
     if mien_profile is None:
         monkeypatch.delenv("MIEN_PROFILE", raising=False)
@@ -356,6 +371,58 @@ def test_prompt_is_silent_without_a_config(tmp_path, monkeypatch):
     result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
                          remote="https://github.com/acme-core/api.git")
     assert result.exit_code == 0 and result.output == ""
+
+
+def test_prompt_says_so_on_an_unreadable_config(tmp_path, monkeypatch):
+    # A blank prompt segment reads as "nothing to report", when in fact mien can
+    # no longer tell who you are here — so it shows a marker instead of nothing.
+    _write_broken_cfg(tmp_path, monkeypatch)
+    result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0  # a prompt command must never fail the shell
+    assert "mien:config" in result.stdout
+
+
+def test_prompt_puts_the_config_marker_on_stdout_not_stderr(tmp_path, monkeypatch):
+    # Deliberate, and easy for a later refactor to flip: a prompt redraws
+    # constantly and its stderr goes straight to the terminal, so a message
+    # there would spam every redraw. The marker rides in the segment instead.
+    _write_broken_cfg(tmp_path, monkeypatch)
+    result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert "mien:config" in result.stdout
+    assert result.stderr == ""
+
+
+def test_prompt_config_marker_stays_compact(tmp_path, monkeypatch):
+    # It has to sit inside a prompt line: no newline (same as a healthy
+    # segment), and no parse detail — `mien doctor` is where that belongs.
+    _write_broken_cfg(tmp_path, monkeypatch)
+    result = _run_prompt("/flat/api", monkeypatch, mien_profile="work",
+                         remote="https://github.com/acme-core/api.git")
+    assert "\n" not in result.stdout
+    assert "invalid config JSON" not in result.stdout
+    assert str(tmp_path) not in result.stdout
+    assert len(_ANSI.sub("", result.stdout)) <= 32
+
+
+def test_guard_fails_open_on_an_unreadable_config_and_says_it_is_not_enforcing(
+        tmp_path, monkeypatch):
+    # These are the exact inputs that make guard refuse when the config parses
+    # (see test_guard_blocks_a_wrong_active_identity), so this pins both halves
+    # at once: it no longer blocks — a broken config must not wedge a commit —
+    # and it says why, because a guard that silently stopped guarding is worse
+    # than one that admits it. Neither half may regress alone.
+    _write_broken_cfg(tmp_path, monkeypatch)
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/acme-core/api.git")
+    assert result.exit_code == 0
+    assert "refusing" not in result.output
+    assert "NOT enforcing" in result.stderr
+    assert "config unreadable" in result.stderr
+    # A pre-commit hook's stdout is not a place to narrate; the warning is a
+    # diagnostic, so it goes to stderr and nowhere else.
+    assert result.stdout == ""
 
 
 def test_guard_blocks_a_wrong_active_identity(tmp_path, monkeypatch):

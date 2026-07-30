@@ -16,7 +16,8 @@ from mien.ambient import (
     unexpandable_scope_vars,
     write_ambient,
 )
-from mien.backends import UnknownBackendType, ensure_known_backend, load_backend
+from mien.backends import (SecretNotFound, UnknownBackendType,
+                           ensure_known_backend, load_backend)
 from mien.ephemeral import EphemeralStore
 from mien.config import (
     AWSService,
@@ -101,6 +102,24 @@ def _friendly_backend_message(exc: BaseException) -> str | None:
             "Until mien can read it, it cannot tell which identity is which — so "
             "the status line shows a warning in place of your identity, and `mien "
             "guard` stops enforcing (it says so instead of blocking)."
+        )
+
+    # A reference whose secret is gone. Reached whenever a profile is activated
+    # (`use`, `exec`, `run` load every ref it names) and from `logout` (deleting
+    # one), and as a traceback it named neither the identity that is now unusable
+    # nor a way out. The exception's own text carries whatever context the raiser
+    # had — `build_env` adds the profile and the variable — and the advice below
+    # is the part that holds wherever the dangling ref came from: a secret deleted
+    # in the backend by hand, or one two references shared.
+    if isinstance(exc, SecretNotFound):
+        return (
+            f"the secrets backend has no secret for a reference mien's config "
+            f"still names: {exc}\n\n"
+            "The secret was removed without the reference, so this profile cannot "
+            "be activated until the two agree again.\n\n"
+            "Store the secret again to make the reference live:\n"
+            "  mien login <profile> --service <service>\n"
+            "  mien login <profile> --service custom --name <VAR>   # a custom variable"
         )
 
     try:
@@ -1094,12 +1113,21 @@ def login_cmd(
         secret = _read_secret(
             f"Secret for {var_name}", secret_cmd=secret_cmd, from_stdin=token_stdin)
         # The same `default` template every other service renders through, with
-        # the variable name as the `kind` — `mien-work-custom-anthropic_api_key`.
-        # Lower-cased for the backends whose names are conventionally lower-case
-        # and to match every other rendered kind (`access_key_id`, `api_token`).
+        # the variable name verbatim as the `kind` —
+        # `mien-work-custom-ANTHROPIC_API_KEY`.
+        #
+        # Verbatim, deliberately: environment variable names are case-sensitive,
+        # so `TOKEN` and `token` are two different variables carrying two
+        # different secrets. Case-folding the kind rendered ONE secret name for
+        # both, so the second login overwrote the first login's secret and the
+        # config kept two names pointing at the survivor — silent credential
+        # destruction, and a dangling ref as soon as either was logged out.
+        # Every backend takes the name as written: GCP secret IDs allow
+        # `[A-Za-z0-9_-]`, and Keychain/keyring match their service+account
+        # attributes case-sensitively.
         ref = backend.put(
             render_name(cfg.secret_naming.default, profile=profile_name,
-                        service="custom", kind=var_name.lower()),
+                        service="custom", kind=var_name),
             secret.encode("utf-8"),
         )
         # Only the reference is stored. That is what keeps config.json and the

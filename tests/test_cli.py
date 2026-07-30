@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from mien.backends.base import SecretNotFound
 from mien.cli import main
 
 
@@ -2194,9 +2195,9 @@ def test_login_custom_stores_a_ref_and_never_the_secret(runner, mien_cfg, mocker
     assert result.exit_code == 0, result.output
     assert "stored ANTHROPIC_API_KEY for work" in result.output
     # The secret goes to the backend under the `default` template, with the
-    # variable name (lower-cased) as the kind.
+    # variable name verbatim as the kind.
     name, payload = backend.put.call_args[0]
-    assert name == "mien-work-custom-anthropic_api_key"
+    assert name == "mien-work-custom-ANTHROPIC_API_KEY"
     assert payload == b"sk-ant-super-secret"
     # Only the reference lands in the config — this is the whole difference from
     # `project_env`, whose values are stored verbatim.
@@ -2296,6 +2297,35 @@ def test_login_custom_composes_several_variables_on_one_profile(runner, mien_cfg
         "ANTHROPIC_API_KEY": "ref://anthropic", "NPM_TOKEN": "ref://npm"}
 
 
+def test_login_custom_gives_two_names_differing_only_in_case_two_secrets(
+    runner, mien_cfg, mocker
+):
+    """`TOKEN` and `token` are two shell variables, so they are two stored secrets.
+
+    Case-folding the rendered kind made one backend name for both: the second
+    login overwrote the first login's secret (`put` is a plain overwrite) and the
+    config kept two variables pointing at the survivor — one credential silently
+    destroyed, and a dangling reference the moment either was logged out.
+    """
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.side_effect = lambda name, value: f"ref://{name}"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    runner.invoke(main, ["login", "work", "--service", "custom", "--name",
+                         "TOKEN", "--token-stdin"], input="y\nupper-secret\n")
+    result = runner.invoke(main, ["login", "work", "--service", "custom", "--name",
+                                  "token", "--token-stdin"], input="lower-secret\n")
+    assert result.exit_code == 0, result.output
+    stored = {c.args[0]: c.args[1] for c in backend.put.call_args_list}
+    assert stored == {"mien-work-custom-TOKEN": b"upper-secret",
+                      "mien-work-custom-token": b"lower-secret"}
+    custom = json.loads(mien_cfg.read_text())["profiles"]["work"]["custom"]
+    assert custom == {"TOKEN": "ref://mien-work-custom-TOKEN",
+                      "token": "ref://mien-work-custom-token"}
+    # The point of the two asserts above, said once more as the property: no two
+    # variables may share a reference, or `logout` of one guts the other.
+    assert len(set(custom.values())) == 2
+
+
 def test_login_custom_accepts_a_secret_cmd_reference(runner, mien_cfg, mocker):
     """The existing secret-reading path, unchanged — no new way to supply one."""
     backend = mocker.patch("mien.cli.load_backend").return_value
@@ -2375,6 +2405,31 @@ def test_use_exports_a_custom_var_without_printing_it(tmp_path, monkeypatch, moc
     assert "sk-secret" not in result.output
     body = Path(result.output.strip().split("'")[1]).read_text()
     assert "export ANTHROPIC_API_KEY='sk-secret'" in body
+
+
+def test_use_names_the_variable_when_its_secret_is_gone_instead_of_crashing(
+    tmp_path, monkeypatch, mocker
+):
+    """A reference whose secret was deleted is an error a person can act on.
+
+    Nothing on this path caught `SecretNotFound`, so a secret removed out of band
+    — or one that two references shared before mien stopped folding their names —
+    came out as a traceback with a bare ref in it and a profile that would not
+    activate.
+    """
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://gone"})
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.get.side_effect = SecretNotFound("ref://gone")
+    result = CliRunner().invoke(main, ["use", "work"])
+    assert result.exit_code != 0
+    # Translated, not propagated: a traceback would leave `result.exception` as
+    # the backend error itself.
+    assert not isinstance(result.exception, SecretNotFound)
+    assert "ref://gone" in result.output          # the reference,
+    assert "ANTHROPIC_API_KEY" in result.output   # the variable it delivers,
+    assert "'work'" in result.output              # the profile that is stuck,
+    assert "mien login" in result.output          # and the way out.
 
 
 def test_unset_clears_custom_vars_named_by_any_profile(tmp_path, monkeypatch):

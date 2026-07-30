@@ -194,7 +194,9 @@ mien logout <profile> --service custom --name ANTHROPIC_API_KEY     # deletes th
 
 `--name` is required with `--service custom` and refused with every other service (silently ignoring it is how someone believes they stored an API key and actually overwrote a github token). `logout` on a name the profile does not have is an error, not a no-op. The secret is read by the same three mechanisms every other service uses — hidden `getpass`, `--token-stdin`, `--secret-cmd` — and there is no fourth.
 
-The backend secret name is rendered from the `secret_naming.default` template with `service` = `custom` and `kind` = the variable name **lower-cased**, so `ANTHROPIC_API_KEY` on profile `work` under the built-in template is `mien-work-custom-anthropic_api_key`.
+The backend secret name is rendered from the `secret_naming.default` template with `service` = `custom` and `kind` = the variable name **verbatim**, so `ANTHROPIC_API_KEY` on profile `work` under the built-in template is `mien-work-custom-ANTHROPIC_API_KEY`. Case is preserved because environment variable names are case-sensitive: `TOKEN` and `token` are two different variables carrying two different secrets, and folding the case would render one secret name for both — the second `login` overwriting the first's secret while the config kept both names pointing at the survivor. Every supported backend takes the name as written (GCP secret IDs allow `[A-Za-z0-9_-]`; Keychain and keyring match their service/account attributes case-sensitively).
+
+A reference whose secret is no longer in the backend — deleted there by hand, say — is reported as an error naming the profile, the variable and the reference, with `mien login` as the way to make the reference live again. It is not a traceback, and it is the same error however the reference came to dangle.
 
 **A variable name is refused two ways**, at `mien login` time *and* at parse time, so a hand-edited config fails exactly as the CLI would have:
 

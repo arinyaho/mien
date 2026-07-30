@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from mien.backends.base import SecretNotFound
 from mien.config import (
     AWSService,
     AtlassianService,
@@ -262,6 +263,20 @@ def test_a_profile_with_no_custom_variables_adds_none(monkeypatch, tmp_path):
     env = build_env(Profile(name="bare"), backend, pid=223).env
     assert set(env) == {"MIEN_PROFILE", "MIEN_EPHEMERAL_DIR"}
     backend.get.assert_not_called()
+
+
+def test_a_dangling_custom_ref_says_which_variable_of_which_profile(monkeypatch, tmp_path):
+    """The backend raises with the ref alone; that is not enough to act on."""
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    backend = MagicMock()
+    backend.get.side_effect = SecretNotFound("anthropic-ref")
+    prof = Profile(name="work", custom={"ANTHROPIC_API_KEY": "anthropic-ref"})
+    with pytest.raises(SecretNotFound) as excinfo:
+        build_env(prof, backend, pid=225)
+    message = str(excinfo.value)
+    assert "anthropic-ref" in message
+    assert "ANTHROPIC_API_KEY" in message
+    assert "'work'" in message
 
 
 def test_a_custom_variable_is_no_secret_on_disk(monkeypatch, tmp_path):

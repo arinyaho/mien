@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mien.backends.base import SecretsBackend
+from mien.backends.base import SecretNotFound, SecretsBackend
 from mien.config import Profile
 from mien.ephemeral import EphemeralStore
 
@@ -111,6 +111,17 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
     # here can overwrite a built-in — which is why the collision is refused
     # rather than resolved by statement order.
     for var, ref in profile.custom.items():
-        bundle.env[var] = backend.get(ref).decode("utf-8").strip()
+        try:
+            bundle.env[var] = backend.get(ref).decode("utf-8").strip()
+        except SecretNotFound as exc:
+            # A backend raises with the ref alone, which is the one fact a person
+            # cannot act on: it says a secret is missing, not that THIS profile's
+            # THIS variable is why the activation failed. Re-raised as the same
+            # type — `cli._friendly_backend_message` renders a SecretNotFound as
+            # an actionable error wherever it comes from — carrying the two facts
+            # only this loop has.
+            raise SecretNotFound(
+                f"{ref} (profile {profile.name!r}, custom variable {var})"
+            ) from exc
 
     return bundle

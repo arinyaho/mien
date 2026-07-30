@@ -280,7 +280,7 @@ mien exec  work -- claude -p "review this"                          # arrives as
 mien logout work --service custom --name ANTHROPIC_API_KEY          # deletes the secret, forgets the name
 ```
 
-The secret goes to your backend under the usual rendered name (`mien-work-custom-anthropic_api_key`); the profile stores only a **reference** to it:
+The secret goes to your backend under the usual rendered name, with the variable name in it exactly as you wrote it (`mien-work-custom-ANTHROPIC_API_KEY`) — env var names are case-sensitive, so `TOKEN` and `token` are two variables and get two secrets. The profile stores only a **reference** to it:
 
 ```jsonc
 "work": {

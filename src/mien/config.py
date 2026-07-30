@@ -11,6 +11,14 @@ from pathlib import Path
 from types import UnionType
 from typing import Union, get_args, get_origin, get_type_hints
 
+from mien.secret_naming import (
+    BUILTIN_DEFAULT,
+    BUILTIN_SLACK_TOKEN,
+    REQUIRED_TOKENS,
+    TOKEN_SEPARATES,
+    template_tokens,
+)
+
 SCHEMA_VERSION = 1
 
 
@@ -180,10 +188,18 @@ def load_config() -> Config | None:
     which identity is which, which is exactly what ConfigError means.
 
     Translated here rather than in each caller so every surface gets it at once
-    — the fail-open ones (status line, prompt, guard) recognize ConfigError as
-    "I have stopped working" and would otherwise swallow an OSError in their
-    catch-all and go quiet, and `_friendly_backend_message` renders it as an
-    actionable error instead of an OSError traceback.
+    — the fail-open ones recognize ConfigError as "I have stopped working" and
+    would otherwise swallow an OSError in their catch-all and go quiet, and
+    `_friendly_backend_message` renders it as an actionable error instead of an
+    OSError traceback.
+
+    Which surfaces those are is not a fixed list: `guard`, the status line and the
+    prompt fail open because they annotate someone else's work rather than doing
+    it, and `mien unset` and `mien status` joined them once they had to read the
+    config for the names of a profile's `custom` variables (see
+    `cli._profiles_for_vars` — `unset` is eval'd through a shell wrapper, so
+    exiting non-zero would clear nothing at all). Every one of them announces the
+    failure on stderr; none of them may go quiet.
     """
     path = config_path()
     try:
@@ -475,6 +491,73 @@ def check_custom_var_name(where: str, name: object) -> None:
             f"recorded transcript and `mien exec` from running under the wrong "
             f"identity, and it disarms them silently. Pick another name."
         )
+
+
+_BUILTIN_TEMPLATE = {"default": BUILTIN_DEFAULT, "slack_token": BUILTIN_SLACK_TOKEN}
+
+
+def _check_secret_name_template(key: str, template: str) -> None:
+    """Require a secret-name template to distinguish what it names.
+
+    ``secret_naming`` is user-editable, and every ``mien login`` renders one of
+    its two templates to decide WHERE a credential is stored. Nothing else keeps
+    those names apart: the "one credential, one secret" property comes entirely
+    from the template spending every token it is rendered with. Drop one --
+    ``"mien-{profile}-{service}"`` is a plausible hand-edit, and a manifest pulled
+    from a shared backend can carry it too -- and two credentials render the same
+    name. `mien login` then stores the second over the first with nothing said,
+    both config entries point at the survivor, and `mien logout` of either deletes
+    the secret the other still references, leaving a profile that cannot be
+    activated at all. That is the same silent credential destruction the
+    verbatim-`kind` rule exists to prevent, reached through a config field instead
+    of through case folding; which of two credentials a shell ends up carrying
+    must not be decided silently either way.
+
+    The rule is *presence of every token*, checked syntactically, rather than
+    "the rendered names for two different inputs must differ". The latter is the
+    real property, but it is injectivity over every possible input and a couple of
+    probe renders cannot establish it: probing ``kind="a"`` against ``kind="b"``
+    passes ``"{profile}-{service}-{kind:.1s}"``, which then collapses
+    ``ANTHROPIC_API_KEY`` onto ``NPM_TOKEN`` in real use. Presence is decidable,
+    is exactly what the error message can name, and for a ``str.format`` template
+    is what "distinguishes" means. See ``secret_naming.template_tokens`` for the
+    two ways a token can appear to be present without substituting.
+
+    Checked at parse time, so it covers every way a template arrives: a
+    hand-edited config file, and `mien sync`/`mien init`'s import of the shared
+    backend manifest, which goes through this same parser. `mien init` needs no
+    check of its own -- it writes the built-in templates and offers no way to type
+    one.
+    """
+    required = REQUIRED_TOKENS[key]
+    try:
+        present = template_tokens(template)
+    except ValueError as exc:
+        # An unbalanced brace. Reported here rather than left to `render_name`,
+        # where it surfaces as a bare ValueError out of whichever command first
+        # stores or reads a secret -- and, since this check now runs on load,
+        # would otherwise escape `deserialize_config` as a non-ConfigError that
+        # the fail-open surfaces do not recognize as a config failure.
+        raise ConfigError(
+            f"secret_naming: {key!r} template {template!r} is not a usable "
+            f"template ({exc}) — mien cannot render a secret name from it. "
+            f"Expected {', '.join('{%s}' % t for t in required)} in some "
+            f"arrangement, e.g. {_BUILTIN_TEMPLATE[key]!r}."
+        ) from exc
+    missing = [t for t in required if t not in present]
+    if not missing:
+        return
+    raise ConfigError(
+        f"secret_naming: {key!r} template {template!r} does not use "
+        f"{', '.join('{%s}' % t for t in missing)}, so "
+        f"{'; '.join(TOKEN_SEPARATES[t] for t in missing)}. Two credentials then "
+        f"land on one backend secret: the second `mien login` overwrites the "
+        f"first with nothing said, and a later `mien logout` of either deletes "
+        f"the secret the other one still points at. Every token mien renders "
+        f"this template with has to appear in it — "
+        f"{', '.join('{%s}' % t for t in required)} — in whatever arrangement "
+        f"you like. The built-in template is {_BUILTIN_TEMPLATE[key]!r}."
+    )
 
 
 def _custom_map_from_raw(profile_name: str, value: object) -> dict[str, str]:
@@ -948,9 +1031,11 @@ def _config_from_dict(raw: dict) -> Config:
     # not the built-in template.
     _check_leaf_values("secret_naming", sn, SecretNaming)
     secret_naming = SecretNaming(
-        default=sn.get("default", "mien-{profile}-{service}-{kind}"),
-        slack_token=sn.get("slack_token", "mien-{profile}-slack-{workspace}-token"),
+        default=sn.get("default", BUILTIN_DEFAULT),
+        slack_token=sn.get("slack_token", BUILTIN_SLACK_TOKEN),
     )
+    _check_secret_name_template("default", secret_naming.default)
+    _check_secret_name_template("slack_token", secret_naming.slack_token)
 
     profiles: dict[str, Profile] = {}
     for name, p in _optional_mapping_from_raw("profiles", raw.get("profiles")).items():

@@ -7,6 +7,7 @@ from click.testing import CliRunner
 
 from mien.backends.base import SecretNotFound
 from mien.cli import main
+from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN
 
 
 @pytest.fixture
@@ -70,7 +71,7 @@ def _rich_profile_cfg(tmp_path, monkeypatch):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(
             name="work",
             google=GoogleService(email="me@acme.example", oauth_client_id="c",
@@ -109,7 +110,7 @@ def test_whoami_card_omits_absent_providers(runner, tmp_path, monkeypatch):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"solo": Profile(
             name="solo",
             github=GitHubService(username="octocat", host="github.com", token_ref="r"))},
@@ -139,7 +140,7 @@ def _project_env(tmp_path, monkeypatch, *profiles):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={p: Profile(name=p) for p in profiles},
     ))
     ws = tmp_path / "ws"
@@ -285,7 +286,7 @@ def test_whoami_live_cleans_ephemeral_credential_files(runner, tmp_path, monkeyp
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="octocat", host="github.com", token_ref="ref://gh"),
@@ -313,7 +314,7 @@ def test_whoami_live_names_google_when_it_cannot_be_probed(runner, mien_cfg, moc
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="octocat", host="github.com", token_ref="ref://gh"),
@@ -343,7 +344,7 @@ def test_whoami_live_names_unchecked_services(runner, mien_cfg, mocker):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="octocat", host="github.com", token_ref="ref://gh"),
@@ -478,7 +479,7 @@ def _use_setup(runner, mocker, tmp_path, monkeypatch, *, slack=True):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="me", host="github.com", token_ref="ref://gh"),
@@ -1131,8 +1132,8 @@ def _manifest_cfg():
         schema_version=1,
         secrets_backend=BackendConfig(type="gcp_secret_manager", options={"project": "p1"}),
         bootstrap={"gcp_account": "me@x.com"},
-        secret_naming=SecretNaming(default="mien-{profile}-{service}-{kind}",
-                                   slack_token="mien-{profile}-slack-{workspace}-token"),
+        secret_naming=SecretNaming(default=BUILTIN_DEFAULT,
+                                   slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work",
                                   github=GitHubService(username="u", host="github.com",
                                                        token_ref="ref://x"))},
@@ -1368,7 +1369,7 @@ def _config_with_retired_backend() -> None:
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="oci_vault", options={"vault_id": "v1"}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(
             name="work",
             github=GitHubService(username="octocat", host="github.com", token_ref="r"))},
@@ -1755,7 +1756,7 @@ def _pinned_config(tmp_path, monkeypatch, **scopes):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={n: Profile(name=n, default_for=list(g)) for n, g in scopes.items()},
     ))
 
@@ -2060,7 +2061,7 @@ def test_run_removes_ephemeral_files_after_child_exits(runner, tmp_path, monkeyp
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(
             name="work",
             default_for=["*/Projects/acme"],
@@ -2107,7 +2108,7 @@ def test_env_sync_writes_ambient_and_wires_zshenv(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     save_config(Config(schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", project_env=[
             ProjectEnvScope(match="*/work", env={"AWS_PROFILE": "work"})])}))
     res = CliRunner().invoke(main, ["env", "sync"])
@@ -2127,7 +2128,7 @@ def _env_sync_with_scope(monkeypatch, tmp_path, scope):
     monkeypatch.setenv("HOME", str(tmp_path))
     save_config(Config(schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", project_env=[
             ProjectEnvScope(match=scope, env={"AWS_PROFILE": "work"})])}))
     return CliRunner().invoke(main, ["env", "sync"])
@@ -2175,8 +2176,8 @@ def _custom_cfg(tmp_path, monkeypatch, **customs):
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
         bootstrap={},
-        secret_naming=SecretNaming(default="mien-{profile}-{service}-{kind}",
-                                   slack_token="s"),
+        secret_naming=SecretNaming(default=BUILTIN_DEFAULT,
+                                   slack_token=BUILTIN_SLACK_TOKEN),
         profiles={name: Profile(name=name, custom=dict(custom))
                   for name, custom in customs.items()},
     ))
@@ -2360,6 +2361,40 @@ def test_login_custom_gives_two_names_differing_only_in_case_two_secrets(
     # The point of the two asserts above, said once more as the property: no two
     # variables may share a reference, or `logout` of one guts the other.
     assert len(set(custom.values())) == 2
+
+
+def test_two_custom_logins_cannot_both_succeed_under_a_collapsing_template(
+    runner, mien_cfg, mocker
+):
+    """The same silent overwrite, reached through `secret_naming` instead of case.
+
+    `secret_naming.default` is hand-editable and a pulled manifest can carry it,
+    and `{kind}` is the *only* thing that keeps one custom variable's secret apart
+    from the next. With it dropped, both logins used to exit 0, both refs pointed
+    at one secret, `mien exec` handed the same value out under both variable names,
+    and `mien logout` of either left the other dangling — a profile that cannot be
+    activated at all.
+
+    Nothing is stored now: the config that says so cannot be loaded, so the first
+    login already fails, before a secret is read or written.
+    """
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.side_effect = lambda name, value: f"ref://{name}"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    payload = json.loads(mien_cfg.read_text())
+    payload["secret_naming"]["default"] = "mien-{profile}-{service}"
+    mien_cfg.write_text(json.dumps(payload))
+    for name in ("ANTHROPIC_API_KEY", "NPM_TOKEN"):
+        result = runner.invoke(
+            main, ["login", "work", "--service", "custom", "--name", name,
+                   "--token-stdin"],
+            input="y\nsecret-for-%s\n" % name,
+        )
+        assert result.exit_code != 0, result.output
+        assert "does not use {kind}" in result.output
+    backend.put.assert_not_called()
+    # And the config is untouched: nothing claims to have stored anything.
+    assert json.loads(mien_cfg.read_text())["profiles"] == {}
 
 
 def test_login_custom_accepts_a_secret_cmd_reference(runner, mien_cfg, mocker):

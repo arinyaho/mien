@@ -44,12 +44,9 @@ mien exec personal -- claude -p "…"        # arrives as $ANTHROPIC_API_KEY
 mien logout personal --service custom --name ANTHROPIC_API_KEY
 ```
 
-`--name` is the variable name and must be a shell identifier that is not already
-one of mien's built-ins (`GH_TOKEN`, `AWS_PROFILE`, `NOTION_TOKEN`, …); the
-collision is refused and names the service it would fight. The config stores only
-a reference, so the secret stays in the backend. `mien status` reports the
-variable as `<set>`, never its value, and there is no `mien token custom` —
-`mien exec` is the interface.
+`--name` is the variable name. It must be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`), and it may not be any of: a name mien already uses for a built-in service (`GH_TOKEN`, `AWS_PROFILE`, `NOTION_TOKEN`, … — the refusal names the service it would fight), one the shell or mien itself reads as an instruction (`PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG`), or one of the agent-harness capture markers mien reads to know an agent is driving (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `MIEN_CAPTURED`). All four refusals fire at `login` time and again whenever the config is parsed, so a hand-edited config fails the same way; `schema.md` carries the full list and the reason for each.
+
+The config stores only a reference, so the secret stays in the backend. `mien status` reports the variable as `<set>`, never its value, and there is no `mien token custom` — `mien exec` is the interface.
 
 ## Activate (interactive shell)
 
@@ -130,11 +127,7 @@ mien whoami --live personal     # verified: who the providers say you are
 expired token), and those are reported distinctly since they need different remedies. A
 provider that could not be reached is shown but does not fail the check.
 
-Two limits worth knowing before you rely on the exit code as a gate: **AWS is reported, not
-verified** — a profile name is not an ARN, so there is no configured value to compare and a
-wrong-but-valid AWS account will not trip the gate; and **slack/atlassian/notion/oci are not
-probed yet**, so `--live` lists them as unchecked rather than pretending it verified them.
-The gate is trustworthy for GitHub and Google. Chain it before anything you cannot take back:
+Two limits worth knowing before you rely on the exit code as a gate: **AWS is reported, not verified** — a profile name is not an ARN, so there is no configured value to compare and a wrong-but-valid AWS account will not trip the gate; and **GitHub, AWS and Google are the only services with a live probe at all**, so everything else the profile configures is listed by name under `not checked (no live probe yet)` rather than pretended verified. `custom` is always on that line — mien is told a variable name, never what the credential is for — and so is a gcloud-login-only `google` with no stored refresh token, which the probe structurally cannot verify. Read the line rather than assuming a clean report covered the service you care about; the gate itself is trustworthy for GitHub and Google. Chain it before anything you cannot take back:
 
 ```bash
 mien whoami --live work && mien exec work -- gh pr merge 123

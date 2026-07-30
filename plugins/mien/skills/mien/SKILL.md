@@ -147,13 +147,9 @@ credential — so it gates the action when chained before it:
 $MIEN whoami --live work-foo && $MIEN exec work-foo -- gh pr merge 123
 ```
 
-Its exit code is the gate; a wrong live identity or a revoked token stops the `&&`. Caveats
-worth knowing: a provider that could not be reached is reported but does not fail the check
-(could-not-check is not the same as wrong); AWS is reported, not verified, since a profile
-name is not an ARN there is nothing to compare; and slack/atlassian/notion/oci are not
-probed yet, so `--live` names them as unchecked rather than pretending it verified them. For
-a single service you can also inline the comparison, since a bare `gh api user` succeeds
-under *any* valid token and exit status alone gates nothing:
+Its exit code is the gate; a wrong live identity or a revoked token stops the `&&`. Caveats worth knowing: a provider that could not be reached is reported but does not fail the check (could-not-check is not the same as wrong); AWS is reported, not verified, since a profile name is not an ARN there is nothing to compare; and **GitHub, AWS and Google are the only services with a live probe at all** — everything else the profile configures is listed by name under `not checked (no live probe yet)` rather than pretended verified, so read that line instead of assuming a clean report covered the service you care about (`custom` is always on it, since mien is told a variable name and never what the credential is for, and so is a gcloud-login-only `google` with no stored refresh token, which the probe structurally cannot verify).
+
+For a single service you can also inline the comparison, since a bare `gh api user` succeeds under *any* valid token and exit status alone gates nothing:
 
 ```bash
 [ "$($MIEN run -- gh api user -q .login)" = "expected-login" ] \
@@ -224,7 +220,14 @@ mien login  <profile> --service custom --name NPM_TOKEN --secret-cmd 'op read op
 mien logout <profile> --service custom --name ANTHROPIC_API_KEY                   # deletes the secret
 ```
 
-`--name` is the environment variable name. It is required with `--service custom`, refused with any other service, must be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`), and must not be one mien already uses for a built-in service (`GH_TOKEN`, `AWS_PROFILE`, `NOTION_TOKEN`, `MIEN_PROFILE`, …) — mien refuses the collision and names the service it would fight, so pick another name or use that built-in's own `--service`. Only a backend *reference* is written to the config, so the secret is not in `config.json` and not in the pushed manifest.
+`--name` is the environment variable name. It is required with `--service custom` and refused with any other service. mien refuses a name **four** ways — at `login` time and again every time the config is parsed, so a hand-edited config fails exactly as the CLI would have, and each error says what the name already means:
+
+- it is not a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`, ASCII only);
+- it is a variable mien already exports itself — either for a built-in service (`GH_TOKEN`, `AWS_PROFILE`, `NOTION_TOKEN`, …), where the error names the service it would fight so you can use that built-in's own `--service` instead, or for mien's own bookkeeping (`MIEN_PROFILE`, `MIEN_EPHEMERAL_DIR`), where the only remedy is another name;
+- it is one the shell or mien itself reads as an instruction: `PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG`;
+- it is one of the agent-harness capture markers mien reads to know an agent is driving: `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `MIEN_CAPTURED`.
+
+The last two exist because `mien use` and `mien-unset` `unset` every managed name in *every* shell, and that list is the union over all profiles: such a name in one profile would break shells that have nothing to do with it, or — for a marker, whose absence mien reads as "no agent is watching" — silently disarm the `mien token` and `mien exec` refusals described above. Matching is exact and case-sensitive throughout (`MY_PATH` is an ordinary name); `references/schema.md` carries the full list and the reason for each. Only a backend *reference* is written to the config, so the secret is not in `config.json` and not in the pushed manifest.
 
 For AWS:
 

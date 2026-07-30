@@ -18,6 +18,7 @@ from mien.config import (
     save_config,
     serialize_config,
 )
+from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN
 
 
 def test_config_path_uses_env_override(monkeypatch, tmp_path):
@@ -73,7 +74,7 @@ def test_owns_remotes_survives_a_roundtrip_and_rejects_a_bare_string(monkeypatch
     cfg = Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="x", slack_token="y"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             owns_remotes=["github.com/me/*", "github.com/me-labs/*"],
@@ -101,7 +102,7 @@ def test_git_identity_fields_survive_a_roundtrip(monkeypatch, tmp_path):
     cfg = Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="x", slack_token="y"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", git_email="me@x.example")},
     )
     save_config(cfg)
@@ -370,7 +371,7 @@ def test_save_creates_parent_dir_and_chmods_600(monkeypatch, tmp_path):
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
         bootstrap={},
-        secret_naming=SecretNaming(default="x", slack_token="y"),
+        secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={},
     )
     save_config(cfg)
@@ -431,7 +432,7 @@ def test_project_env_round_trips():
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
         bootstrap={},
-        secret_naming=SecretNaming(default="d", slack_token="s"),
+        secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", project_env=[
             ProjectEnvScope(match="*/work/arinyaho", env={"AWS_PROFILE": "work", "WORK_ROOT": "$HOME/work/arinyaho"}),
             ProjectEnvScope(match="*/arinyaho-ai*", env={"PYTHONPATH": "$HOME/x/src"}),
@@ -445,14 +446,14 @@ def test_project_env_round_trips():
 
 def test_config_without_project_env_defaults_empty():
     raw = {"$schema_version": 1, "secrets_backend": {"type": "macos_keychain"},
-           "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+           "bootstrap": {}, "secret_naming": {},
            "profiles": {"p": {"github": None}}}
     assert deserialize_config(raw).profiles["p"].project_env == []
 
 
 def _raw_with_default_for(value) -> dict:
     return {"$schema_version": 1, "secrets_backend": {"type": "macos_keychain"},
-            "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+            "bootstrap": {}, "secret_naming": {},
             "profiles": {"work": {"default_for": value}}}
 
 
@@ -848,7 +849,7 @@ def test_both_schema_version_spellings_still_parse(version_key):
     loading.
     """
     raw = {version_key: 1, "secrets_backend": {"type": "keyring"},
-           "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+           "bootstrap": {}, "secret_naming": {},
            "profiles": {"work": {}}}
     cfg = deserialize_config(raw)
     assert cfg.schema_version == 1
@@ -872,12 +873,13 @@ def test_every_top_level_key_mien_writes_is_accepted():
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
         bootstrap={"gcp_account": "me@example.com"},
-        secret_naming=SecretNaming(default="d-{profile}", slack_token="s-{workspace}"),
+        secret_naming=SecretNaming(default="acme.{kind}.{service}.{profile}",
+                                   slack_token="acme.{workspace}.{profile}"),
         profiles={"work": Profile(name="work")},
     )
     back = deserialize_config(serialize_config(cfg))
     assert back.bootstrap == {"gcp_account": "me@example.com"}
-    assert back.secret_naming.default == "d-{profile}"
+    assert back.secret_naming.default == "acme.{kind}.{service}.{profile}"
 
 
 def test_secret_naming_with_only_known_keys_is_accepted():
@@ -992,6 +994,119 @@ def test_a_wrong_typed_secret_naming_template_is_a_configerror():
         assert f"secret_naming: 'default' must be a string, got {found}" in str(exc.value)
 
 
+def _raw_with_naming(**naming) -> dict:
+    return {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+            "bootstrap": {}, "secret_naming": naming, "profiles": {"work": {}}}
+
+
+@pytest.mark.parametrize("template,missing,collapses", [
+    # The concrete report: `{kind}` is the only thing keeping one custom
+    # variable's secret apart from the next, and github's token from its ssh key.
+    ("mien-{profile}-{service}", "{kind}", "every credential of one service"),
+    # Pre-existing exposure of the same kind: atlassian and notion both store a
+    # kind of `api_token`, so without `{service}` they are one secret.
+    ("mien-{profile}-{kind}", "{service}", "every service renders the same name"),
+    # And without `{profile}` every identity shares one, which is the whole point
+    # of mien.
+    ("mien-{service}-{kind}", "{profile}", "every profile renders the same name"),
+    ("mien-secret", "{profile}, {service}, {kind}", "every profile"),
+])
+def test_a_default_template_that_cannot_distinguish_is_refused(
+    template, missing, collapses
+):
+    """A template that drops a token renders one name for two credentials.
+
+    `mien login` then stores the second over the first with nothing said, both
+    config entries point at the survivor, and `mien logout` of either deletes the
+    secret the other still references. Refused at parse time, so a hand-edited
+    config and a manifest pulled from a shared backend are both covered — the
+    manifest goes through this same parser.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default=template))
+    msg = str(exc.value)
+    assert f"secret_naming: 'default' template {template!r}" in msg
+    assert f"does not use {missing}" in msg
+    assert collapses in msg
+    # What breaks, and the way out.
+    assert "overwrites the first with nothing said" in msg
+    assert "mien-{profile}-{service}-{kind}" in msg
+
+
+@pytest.mark.parametrize("template,missing", [
+    # Two workspaces on one profile, one secret: the same collapse, and
+    # `slack_token` is exposed to it because it is rendered with its own tokens.
+    ("mien-{profile}-slack-token", "{workspace}"),
+    ("mien-slack-{workspace}-token", "{profile}"),
+])
+def test_a_slack_token_template_that_cannot_distinguish_is_refused(template, missing):
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(slack_token=template))
+    msg = str(exc.value)
+    assert f"secret_naming: 'slack_token' template {template!r}" in msg
+    assert f"does not use {missing}" in msg
+    assert "mien-{profile}-slack-{workspace}-token" in msg
+    # `slack_token` is never rendered with a `{service}`: the literal "slack" is
+    # the template's own, so requiring it would refuse the built-in template.
+    assert "{service}" not in msg
+
+
+def test_the_builtin_templates_pass_the_check():
+    """The rule may not reject the config mien writes for itself."""
+    from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN
+    cfg = deserialize_config(_raw_with_naming(
+        default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN))
+    assert cfg.secret_naming.default == BUILTIN_DEFAULT
+    # And so does the absent case, which falls back to those same templates.
+    assert deserialize_config(_raw_with_naming()).secret_naming.default == BUILTIN_DEFAULT
+
+
+@pytest.mark.parametrize("default,slack_token", [
+    # Renamed prefix, the arrangement mien's own docs show.
+    ("acme-{profile}-{service}-{kind}", "acme-{profile}-slack-{workspace}-token"),
+    # Reordered, differently separated, and with extra literals: distinguishing
+    # is the only requirement, not any particular shape.
+    ("{kind}.{service}.{profile}.acme", "{workspace}--{profile}--slack"),
+    # A token may also appear more than once.
+    ("{profile}/{service}/{kind}/{profile}", "{profile}-{workspace}-{workspace}"),
+])
+def test_a_custom_template_that_does_distinguish_still_passes(default, slack_token):
+    cfg = deserialize_config(_raw_with_naming(default=default, slack_token=slack_token))
+    assert cfg.secret_naming.default == default
+    assert cfg.secret_naming.slack_token == slack_token
+
+
+@pytest.mark.parametrize("template", [
+    # `{{kind}}` is an escaped literal: it renders the six characters `{kind}`
+    # for every credential and substitutes nothing, so a substring search for
+    # "{kind}" would wave through a template that collapses everything.
+    "mien-{profile}-{service}-{{kind}}",
+    # A field that only reaches INTO the token does not reproduce it: two kinds
+    # sharing a first character still land on one name.
+    "mien-{profile}-{service}-{kind[0]}",
+])
+def test_a_token_that_looks_present_but_substitutes_nothing_is_refused(template):
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default=template))
+    assert "does not use {kind}" in str(exc.value)
+
+
+def test_a_malformed_template_is_a_configerror_not_a_bare_valueerror():
+    """An unbalanced brace cannot render at all, and must still be a ConfigError.
+
+    The distinctness check parses the template on load, so a template `str.format`
+    chokes on would otherwise escape `deserialize_config` as a plain ValueError —
+    which the fail-open surfaces (guard, status line, `mien unset`) do not
+    recognize as a config failure, so they would go quiet instead of saying they
+    have stopped working.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default="mien-{profile}-{service}-{kind"))
+    msg = str(exc.value)
+    assert "is not a usable template" in msg
+    assert "mien-{profile}-{service}-{kind}" in msg
+
+
 def test_null_is_still_accepted_wherever_the_annotation_allows_it():
     """The leaf check must not turn every optional field into a required one.
 
@@ -1046,7 +1161,8 @@ def test_the_serializers_own_output_survives_the_leaf_check():
         schema_version=1,
         secrets_backend=BackendConfig(type="keyring", options={"service_prefix": "mien-"}),
         bootstrap={"gcp_account": "me@x.example"},
-        secret_naming=SecretNaming(default="d-{profile}", slack_token="s-{workspace}"),
+        secret_naming=SecretNaming(default="acme.{kind}.{service}.{profile}",
+                                   slack_token="acme.{workspace}.{profile}"),
         profiles={
             "work": Profile(
                 name="work",
@@ -1092,7 +1208,7 @@ def test_a_serialized_slack_workspace_still_carries_a_null_team_id():
     cfg = Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="gcp_secret_manager", options={"project": "p"}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", slack=[
             SlackWorkspace(workspace="team-a", user_token_ref="r"),
             SlackWorkspace(workspace="team-b", user_token_ref="r2"),
@@ -1110,7 +1226,7 @@ def test_a_serialized_slack_workspace_still_carries_a_null_team_id():
 
 def _raw_with_custom(value) -> dict:
     return {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
-            "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+            "bootstrap": {}, "secret_naming": {},
             "profiles": {"work": {"custom": value}}}
 
 
@@ -1122,7 +1238,7 @@ def test_a_config_with_no_custom_block_loads_unchanged():
     would have made every existing config unloadable on upgrade.
     """
     raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
-           "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+           "bootstrap": {}, "secret_naming": {},
            "profiles": {"p": {"github": None}, "q": {}}}
     cfg = deserialize_config(raw)
     assert cfg.profiles["p"].custom == {}
@@ -1136,7 +1252,7 @@ def test_custom_round_trips_as_names_pointing_at_refs():
     cfg = Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", custom={
             "ANTHROPIC_API_KEY": "ref://mien-work-custom-anthropic_api_key",
             "NPM_TOKEN": "ref://mien-work-custom-npm_token",

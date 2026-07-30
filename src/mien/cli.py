@@ -53,7 +53,7 @@ from mien.project import (ensure_gitignored, find_declaration, is_allowed,
 from mien.resolve import (AmbiguousScope, claimed_profile, git_author_email,
                           git_origin_remote, profile_for_email, resolve_profile)
 from mien.verify import Status, probe_aws, probe_github, probe_google, run_probe_safely
-from mien.secret_naming import render_name
+from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN, render_name
 from mien.shell import (CAPTURE_MARKER_VARS, custom_vars, emit_unset, emit_use,
                         render_shell_init)
 from mien.statusline import guard_reason, render_segment
@@ -359,8 +359,8 @@ def init_cmd(
         secrets_backend=backend_cfg,
         bootstrap=bootstrap,
         secret_naming=SecretNaming(
-            default="mien-{profile}-{service}-{kind}",
-            slack_token="mien-{profile}-slack-{workspace}-token",
+            default=BUILTIN_DEFAULT,
+            slack_token=BUILTIN_SLACK_TOKEN,
         ),
         profiles={},
     )

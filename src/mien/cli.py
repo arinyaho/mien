@@ -105,8 +105,9 @@ def _friendly_backend_message(exc: BaseException) -> str | None:
             "guard` stops enforcing (it says so instead of blocking)."
         )
 
-    # A reference whose secret is gone. Reached whenever a profile is activated
-    # (`use`, `exec`, `run` load every ref it names) and from `logout` (deleting
+    # A reference whose secret is gone. Reached from every surface that builds the
+    # environment (`use`, `exec`, `run`, and `whoami --live`, which builds it to
+    # probe -- each loads every ref the profile names) and from `logout` (deleting
     # one), and as a traceback it named neither the identity that is now unusable
     # nor a way out. The exception's own text carries whatever context the raiser
     # had — `build_env` adds the profile and the variable — and the advice below

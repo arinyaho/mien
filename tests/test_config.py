@@ -1091,6 +1091,142 @@ def test_a_token_that_looks_present_but_substitutes_nothing_is_refused(template)
     assert "does not use {kind}" in str(exc.value)
 
 
+# The two rules the template check enforces are different mistakes with different
+# fixes, so each error has to say WHICH one was made. These are the phrases the
+# tests below key on; a message may carry one of them, never both.
+_COLLAPSE = "as a plain replacement field"          # rule 1, token not spent
+_DECORATED = "through a format spec, a conversion"  # rule 1, decoration refused
+_UNRENDERABLE = "asks for a field mien does not substitute into it"  # rule 2
+
+
+@pytest.mark.parametrize("template,missing,field", [
+    # The report: a truncating spec. `{kind:.1s}` keeps one character, so
+    # ANTHROPIC_API_KEY and AWS_THING both render `mien-work-custom-A` — the same
+    # collapse as dropping `{kind}`, which the presence-only rule accepted while
+    # refusing the equivalent `{kind[0]}`.
+    ("mien-{profile}-{service}-{kind:.1s}", "{kind}", "{kind:.1s}"),
+    # And the degenerate one: `.0s` keeps nothing, so the rendered name is
+    # byte-identical to the template with `{kind}` deleted.
+    ("mien-{profile}-{service}-{kind:.0s}", "{kind}", "{kind:.0s}"),
+    # A conversion is not a substitution either: `!r` renders `'token'`, quotes
+    # and all, into a backend secret name.
+    ("mien-{profile}-{service}-{kind!r}", "{kind}", "{kind!r}"),
+    # An unknown conversion never even renders; it is refused for the same
+    # structural reason, before anything tries.
+    ("mien-{profile}-{service}-{kind!x}", "{kind}", "{kind!x}"),
+    # Not only `{kind}`: truncate the profile and `work` and `web` share every
+    # secret, which is the whole of what mien is for.
+    ("mien-{profile:.1}-{service}-{kind}", "{profile}", "{profile:.1}"),
+    # A nested spec hides a second field inside the first. The spec is what makes
+    # this rule 1: `{kind}` is not reproduced whatever `{w}` turns out to be.
+    ("mien-{profile}-{service}-{kind:{w}}", "{kind}", "{kind:{w}}"),
+])
+def test_a_token_spent_through_a_spec_or_conversion_does_not_count(
+    template, missing, field
+):
+    """Rule 1 is structural: a required token must appear as a bare `{name}`.
+
+    A probe render cannot establish this. `{kind:.0s}` renders fine — it renders
+    the SAME name for every credential, which is the failure — so "it rendered"
+    says nothing about whether two credentials stay apart. Only the shape of the
+    field does: a plain field reproduces its token verbatim and is therefore
+    injective in it by construction, while a spec, a conversion, an attribute or
+    an index all compute something shorter or different.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default=template))
+    msg = str(exc.value)
+    assert f"does not use {missing} {_COLLAPSE}" in msg
+    # Named the offending field, and said why a decoration is not a substitution.
+    assert field in msg
+    assert "does not count as spending the token" in msg
+    # What breaks, and the way out.
+    assert "overwrites the first with nothing said" in msg
+    assert "has to appear in it as a bare `{name}`" in msg
+    assert "mien-{profile}-{service}-{kind}" in msg
+    # This is rule 1, not rule 2, and the message must not blur the two.
+    assert _UNRENDERABLE not in msg
+
+
+def test_a_decorated_field_is_refused_even_beside_a_plain_one():
+    """Every field must be plain, not just one field per required token.
+
+    `{profile}` is already spent plainly here, so nothing collapses and rule 2's
+    probe would have to render `{w}` — but a spec has no legitimate use in a
+    secret name (the tokens are already strings: `:s` is a no-op, a width pads
+    with spaces, a precision truncates), so it is refused outright. That is what
+    makes "literal text plus plain fields" the exact shape of an accepted
+    template, with no third category to reason about later.
+    """
+    template = "mien-{profile}-{service}-{kind}-{profile:{w}}"
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default=template))
+    msg = str(exc.value)
+    assert _DECORATED in msg
+    assert "{profile:{w}}" in msg
+    assert "`:s` is a no-op" in msg
+    # Rule 1 again — a different mistake from rule 2, and said differently.
+    assert _UNRENDERABLE not in msg
+    assert _COLLAPSE not in msg
+
+
+@pytest.mark.parametrize("key,template,detail", [
+    # An extra token in `default`: `{workspace}` is the OTHER template's, and
+    # `default` is never rendered with it. Parsed clean before; then `mien login`
+    # died with `KeyError: missing token {workspace} in template`.
+    ("default", "mien-{profile}-{service}-{kind}-{workspace}",
+     "missing token {workspace} in template"),
+    # The mirror: `slack_token` is rendered with `{profile}` and `{workspace}`
+    # only, so `{kind}` there has nothing to stand for either.
+    ("slack_token", "mien-{profile}-slack-{workspace}-{kind}",
+     "missing token {kind} in template"),
+    # Positional fields pass any check made on field NAMES — the name is `""` or
+    # `"0"` — and raise from `format_map` instead.
+    ("default", "mien-{profile}-{service}-{kind}-{}",
+     "Format string contains positional fields"),
+    ("default", "mien-{profile}-{service}-{kind}-{0}",
+     "Format string contains positional fields"),
+])
+def test_a_field_mien_does_not_supply_is_refused_at_parse_time(key, template, detail):
+    """Rule 2 is the other direction: present ⊆ supplied, checked by rendering.
+
+    A set difference over the parser's top-level field names does not cover this:
+    `{}` and `{0}` are names a difference cannot judge, and a token buried in a
+    nested spec is not in the top-level walk at all. Rendering once with exactly
+    the tokens mien supplies decides all of them, and — the point — turns the
+    escape into a `ConfigError` at parse time, where the fail-open surfaces
+    recognize it as a config failure, instead of a bare exception out of whichever
+    command first rendered a name.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(**{key: template}))
+    msg = str(exc.value)
+    assert f"secret_naming: {key!r} template {template!r}" in msg
+    assert _UNRENDERABLE in msg
+    # Quotes the underlying failure, so the offending field is identifiable.
+    assert detail in msg
+    # And says what it may use instead.
+    assert ("{profile}, {service}, {kind}" if key == "default"
+            else "{profile}, {workspace}") in msg
+    # This is rule 2, not rule 1: nothing collapsed, the template cannot render.
+    assert _COLLAPSE not in msg
+    assert _DECORATED not in msg
+
+
+def test_literal_braces_and_repeated_plain_fields_are_still_accepted():
+    """The rules bite on decorations and unknown fields, not on ordinary templates.
+
+    `{{...}}` is escaped literal text, not a field, and a plain token may appear
+    as often as you like — both were accepted before and must stay accepted, or
+    the fix has narrowed what a user may write for no safety gain.
+    """
+    cfg = deserialize_config(_raw_with_naming(
+        default="mien-{profile}-{service}-{kind}-{{literal}}-{kind}",
+        slack_token="{profile}/{workspace}/{profile}"))
+    assert cfg.secret_naming.default.endswith("-{kind}")
+    assert cfg.secret_naming.slack_token == "{profile}/{workspace}/{profile}"
+
+
 def test_a_malformed_template_is_a_configerror_not_a_bare_valueerror():
     """An unbalanced brace cannot render at all, and must still be a ConfigError.
 

@@ -2363,8 +2363,20 @@ def test_login_custom_gives_two_names_differing_only_in_case_two_secrets(
     assert len(set(custom.values())) == 2
 
 
+@pytest.mark.parametrize("template", [
+    # `{kind}` dropped outright.
+    "mien-{profile}-{service}",
+    # `{kind}` spent through a truncating format spec, which renders
+    # `mien-work-custom-A` for ANTHROPIC_API_KEY and for AWS_THING alike. This is
+    # the same destruction by another spelling, and it used to pass the check: the
+    # token was "present", so both logins exited 0 and the second secret replaced
+    # the first. The rule is structural now, so the spec cannot buy its way in.
+    "mien-{profile}-{service}-{kind:.1s}",
+    # The degenerate spec, byte-identical in effect to the first case.
+    "mien-{profile}-{service}-{kind:.0s}",
+])
 def test_two_custom_logins_cannot_both_succeed_under_a_collapsing_template(
-    runner, mien_cfg, mocker
+    runner, mien_cfg, mocker, template
 ):
     """The same silent overwrite, reached through `secret_naming` instead of case.
 
@@ -2382,7 +2394,7 @@ def test_two_custom_logins_cannot_both_succeed_under_a_collapsing_template(
     backend.put.side_effect = lambda name, value: f"ref://{name}"
     runner.invoke(main, ["init"], input="2\nmien-\n")
     payload = json.loads(mien_cfg.read_text())
-    payload["secret_naming"]["default"] = "mien-{profile}-{service}"
+    payload["secret_naming"]["default"] = template
     mien_cfg.write_text(json.dumps(payload))
     for name in ("ANTHROPIC_API_KEY", "NPM_TOKEN"):
         result = runner.invoke(
@@ -2395,6 +2407,46 @@ def test_two_custom_logins_cannot_both_succeed_under_a_collapsing_template(
     backend.put.assert_not_called()
     # And the config is untouched: nothing claims to have stored anything.
     assert json.loads(mien_cfg.read_text())["profiles"] == {}
+
+
+@pytest.mark.parametrize("template", [
+    # A token `slack_token` is never rendered with — the one that belongs to the
+    # other template.
+    "mien-{profile}-slack-{workspace}-{kind}",
+    # A positional field, which no check over field names can judge.
+    "mien-{profile}-slack-{workspace}-{}",
+])
+def test_a_bad_slack_token_template_does_not_crash_an_unrelated_login(
+    runner, mien_cfg, mocker, template
+):
+    """The surprising blast radius: `slack_token` breaks a github login.
+
+    `_reject_reserved_secret_name` renders BOTH templates on every `mien login`, to
+    check neither one collides with the config-manifest secret. So a `slack_token`
+    that cannot render took down `--service github`, which has nothing to do with
+    Slack — exit 1, empty stdout, and an uncaught `KeyError` (a traceback in a real
+    terminal) rather than any message naming the template at fault.
+
+    It still fails, and it must: the config names a template mien cannot render, so
+    refusing to load it is the honest answer. What this pins is that the failure is
+    now a legible config error that names `slack_token` and says what to write —
+    not an exception from the middle of a login.
+    """
+    mocker.patch("mien.cli.load_backend")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    payload = json.loads(mien_cfg.read_text())
+    payload["secret_naming"]["slack_token"] = template
+    mien_cfg.write_text(json.dumps(payload))
+    result = runner.invoke(
+        main, ["login", "work", "--service", "github", "--token-stdin"],
+        input="y\nghp-token\n",
+    )
+    assert result.exit_code != 0
+    # Translated, not propagated: a traceback would leave the raw exception here.
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "KeyError" not in result.output and "Traceback" not in result.output
+    assert "secret_naming: 'slack_token' template" in result.output
+    assert "mien-{profile}-slack-{workspace}-token" in result.output
 
 
 def test_login_custom_accepts_a_secret_cmd_reference(runner, mien_cfg, mocker):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from string import Formatter
+from typing import NamedTuple
 
 # The built-in templates. Defined here, beside the renderer, rather than at each
 # use, so the parser's fallback (`mien.config._config_from_dict`), the fresh
@@ -27,6 +28,16 @@ BUILTIN_SLACK_TOKEN = "mien-{profile}-slack-{workspace}-token"
 #
 # `slack_token` gets no `service` token because the literal "slack" is the
 # template's own job; it is not something mien substitutes.
+#
+# This is also, EXACTLY, the set of tokens each template is SUPPLIED with -- every
+# `render_name(secret_naming.default, ...)` call site passes `profile`, `service`
+# and `kind` and nothing else, and every `render_name(secret_naming.slack_token,
+# ...)` passes `profile` and `workspace` and nothing else. So the two directions
+# of the check in `mien.config._check_secret_name_template` read the same table:
+# a required token the template does not spend collapses two credentials onto one
+# secret, and a field the template asks for that is not in this set has no value
+# to substitute and cannot render at all. If a new call site ever supplies a
+# further token, it belongs here, or every existing config becomes unrenderable.
 REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "default": ("profile", "service", "kind"),
     "slack_token": ("profile", "workspace"),
@@ -47,24 +58,68 @@ def render_name(template: str, **tokens: str) -> str:
     return template.format_map(_StrictDict(tokens))
 
 
-def template_tokens(template: str) -> set[str]:
-    """The token names ``template`` actually substitutes.
+class TemplateField(NamedTuple):
+    """One replacement field of a template, as written.
+
+    ``name`` is the field name (``"kind"``, ``"kind[0]"``, ``""`` for a
+    positional ``{}``). ``plain`` says whether the field reproduces that token
+    VERBATIM: no conversion, no format spec, no attribute access, no indexing.
+    ``text`` is the field written back out, for an error message to quote.
+    """
+
+    name: str
+    plain: bool
+    text: str
+
+
+def template_fields(template: str) -> list[TemplateField]:
+    """Every replacement field of ``template``, in order, classified.
 
     Parsed with ``string.Formatter`` rather than searched for as substrings,
     because the two disagree in exactly the cases that matter. ``"{{kind}}"`` is
     an escaped literal that renders the characters ``{kind}`` for every
-    credential -- it contains ``{kind}`` and substitutes nothing. And a field
-    that only reaches INTO the token (``{kind[0]}``, ``{kind.foo}``) does not
-    reproduce it, so two kinds sharing a first character still collide; those
-    field names are not ``kind`` and are deliberately not counted.
+    credential -- it contains ``{kind}`` and substitutes nothing, and ``parse``
+    reports no field for it at all.
 
     A malformed template (``"mien-{profile"``) raises ``ValueError`` from
     ``parse``, which is the caller's to translate -- it is a template that cannot
     render at all.
     """
-    return {
-        name for _, name, _, _ in Formatter().parse(template) if name is not None
-    }
+    fields = []
+    for _, name, spec, conversion in Formatter().parse(template):
+        if name is None:
+            continue
+        plain = conversion is None and not spec and "." not in name and "[" not in name
+        text = "{" + name
+        if conversion is not None:
+            text += "!" + conversion
+        if spec:
+            text += ":" + spec
+        fields.append(TemplateField(name, plain, text + "}"))
+    return fields
+
+
+def template_tokens(template: str) -> set[str]:
+    """The token names ``template`` substitutes VERBATIM, and nothing else.
+
+    Only plain fields count, because only a plain field reproduces the token --
+    which is the whole of what keeps two credentials on two secret names:
+
+    - ``{kind[0]}`` / ``{kind.foo}`` reach INTO the token instead of spending it,
+      so two kinds sharing a first character still render one name; the field
+      name is not ``kind`` either way.
+    - ``{kind:.1s}`` truncates it to one character, and ``{kind:.0s}`` renders
+      nothing at all -- byte-identical to dropping ``{kind}``. Every value here is
+      already a ``str``, so a format spec can only pad it, truncate it, or do
+      nothing; none of those is a use, and truncation is an active collision.
+    - ``{kind!r}`` wraps it in quotes: renderable, but a quoted secret name is
+      never what someone meant.
+
+    So a decorated field is not "the token, presented differently" -- it is a
+    different function of the token, and the collision check has no business
+    treating it as the token. See ``mien.config._check_secret_name_template``.
+    """
+    return {f.name for f in template_fields(template) if f.plain}
 
 
 class _StrictDict(dict):

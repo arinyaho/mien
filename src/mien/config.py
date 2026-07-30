@@ -16,7 +16,8 @@ from mien.secret_naming import (
     BUILTIN_SLACK_TOKEN,
     REQUIRED_TOKENS,
     TOKEN_SEPARATES,
-    template_tokens,
+    render_name,
+    template_fields,
 )
 
 SCHEMA_VERSION = 1
@@ -513,15 +514,38 @@ def _check_secret_name_template(key: str, template: str) -> None:
     of through case folding; which of two credentials a shell ends up carrying
     must not be decided silently either way.
 
-    The rule is *presence of every token*, checked syntactically, rather than
-    "the rendered names for two different inputs must differ". The latter is the
-    real property, but it is injectivity over every possible input and a couple of
-    probe renders cannot establish it: probing ``kind="a"`` against ``kind="b"``
-    passes ``"{profile}-{service}-{kind:.1s}"``, which then collapses
-    ``ANTHROPIC_API_KEY`` onto ``NPM_TOKEN`` in real use. Presence is decidable,
-    is exactly what the error message can name, and for a ``str.format`` template
-    is what "distinguishes" means. See ``secret_naming.template_tokens`` for the
-    two ways a token can appear to be present without substituting.
+    Two rules, checked in this order, and NEITHER SUBSUMES THE OTHER -- do not
+    delete one as redundant:
+
+    1. STRUCTURE (this template maps two credentials onto one name). Every token
+       the template is rendered with must appear as a *plain* replacement field:
+       no conversion, no format spec, no attribute access, no indexing. This is
+       injectivity, and it is why a probe render is not the check: injectivity is
+       a property of every possible input, so probing ``kind="a"`` against
+       ``kind="b"`` waves through ``"{profile}-{service}-{kind:.1s}"``, and
+       ``{kind:.0s}`` renders perfectly while producing one name for everything --
+       byte-identical to dropping ``{kind}``. A plain field, by contrast, is
+       injective in that token by construction. See
+       ``secret_naming.template_tokens`` for why every decorated form is either
+       useless or a collision.
+
+    2. RENDERABILITY (this template cannot produce a name at all). Every field the
+       template asks for must be one mien actually substitutes into it, and here a
+       probe render IS the check -- a set difference on the field names is not. A
+       nested spec hides an unknown token where the parser's top-level walk never
+       sees it (``{kind:{w}}``), and ``{}`` / ``{0}`` pass any name test and then
+       raise from ``format_map``. Rule 1 already refuses every spec, so what the
+       probe is left holding is the positional forms and any token that belongs to
+       the other template -- ``"...-{kind}-{workspace}"`` in ``default``. Without
+       it those escape ``deserialize_config`` as a bare ``KeyError``/``ValueError``
+       that no fail-open surface recognizes as a config failure, and, because
+       ``cli._reject_reserved_secret_name`` renders BOTH templates on every login,
+       a bad ``slack_token`` alone takes down ``mien login --service github``.
+
+    So: a probe cannot establish injectivity (rule 1's job), and a structural walk
+    cannot establish renderability (rule 2's job). The messages are separate too,
+    because dropping a token and naming a token that does not exist are different
+    mistakes with different fixes.
 
     Checked at parse time, so it covers every way a template arrives: a
     hand-edited config file, and `mien sync`/`mien init`'s import of the shared
@@ -530,8 +554,9 @@ def _check_secret_name_template(key: str, template: str) -> None:
     one.
     """
     required = REQUIRED_TOKENS[key]
+    expected = ", ".join("{%s}" % t for t in required)
     try:
-        present = template_tokens(template)
+        fields = template_fields(template)
     except ValueError as exc:
         # An unbalanced brace. Reported here rather than left to `render_name`,
         # where it surfaces as a bare ValueError out of whichever command first
@@ -541,23 +566,71 @@ def _check_secret_name_template(key: str, template: str) -> None:
         raise ConfigError(
             f"secret_naming: {key!r} template {template!r} is not a usable "
             f"template ({exc}) — mien cannot render a secret name from it. "
-            f"Expected {', '.join('{%s}' % t for t in required)} in some "
-            f"arrangement, e.g. {_BUILTIN_TEMPLATE[key]!r}."
+            f"Expected {expected} in some arrangement, e.g. "
+            f"{_BUILTIN_TEMPLATE[key]!r}."
         ) from exc
-    missing = [t for t in required if t not in present]
-    if not missing:
-        return
-    raise ConfigError(
-        f"secret_naming: {key!r} template {template!r} does not use "
-        f"{', '.join('{%s}' % t for t in missing)}, so "
-        f"{'; '.join(TOKEN_SEPARATES[t] for t in missing)}. Two credentials then "
-        f"land on one backend secret: the second `mien login` overwrites the "
-        f"first with nothing said, and a later `mien logout` of either deletes "
-        f"the secret the other one still points at. Every token mien renders "
-        f"this template with has to appear in it — "
-        f"{', '.join('{%s}' % t for t in required)} — in whatever arrangement "
-        f"you like. The built-in template is {_BUILTIN_TEMPLATE[key]!r}."
-    )
+
+    # Rule 1: every required token spent as a bare `{name}`, and no decorated
+    # field anywhere. Refused outright rather than merely not counted, so that an
+    # accepted template is literal text plus plain fields and nothing else.
+    plain = {f.name for f in fields if f.plain}
+    decorated = ", ".join(f.text for f in fields if not f.plain)
+    missing = [t for t in required if t not in plain]
+    if missing:
+        raise ConfigError(
+            f"secret_naming: {key!r} template {template!r} does not use "
+            f"{', '.join('{%s}' % t for t in missing)} as a plain replacement "
+            f"field, so {'; '.join(TOKEN_SEPARATES[t] for t in missing)}. Two "
+            f"credentials then land on one backend secret: the second `mien "
+            f"login` overwrites the first with nothing said, and a later `mien "
+            f"logout` of either deletes the secret the other one still points at."
+            + (
+                f" {decorated} does not count as spending the token: a format "
+                f"spec, a conversion, attribute access or indexing renders "
+                f"something shorter or different, and a shortened token is "
+                f"exactly how two credentials collapse — `{{kind:.1s}}` keeps one "
+                f"character of the name and `{{kind:.0s}}` keeps none."
+                if decorated
+                else ""
+            )
+            + f" Every token mien renders this template with has to appear in it "
+            f"as a bare `{{name}}` — {expected} — in whatever arrangement you "
+            f"like. The built-in template is {_BUILTIN_TEMPLATE[key]!r}."
+        )
+    if decorated:
+        raise ConfigError(
+            f"secret_naming: {key!r} template {template!r} spends {decorated} "
+            f"through a format spec, a conversion, attribute access or indexing. "
+            f"Only a plain replacement field — a bare `{{name}}` — reproduces the "
+            f"token mien renders it with, and mien refuses the decorated forms "
+            f"rather than quietly ignoring them: the tokens are already strings, "
+            f"so `:s` is a no-op, `!r` wraps the name in quotes, a width or fill "
+            f"pads it with spaces, and a precision truncates it (`{{kind:.1s}}` "
+            f"keeps one character of the name, `{{kind:.0s}}` keeps none) — a "
+            f"truncated token renders one secret name for two credentials. Write "
+            f"{expected} as bare fields, plus whatever literal text you like. The "
+            f"built-in template is {_BUILTIN_TEMPLATE[key]!r}."
+        )
+
+    # Rule 2: nothing in the template that mien has no value for. The probe render
+    # uses the token names as their own values -- only renderability is at stake
+    # here, never the shape of the result.
+    try:
+        render_name(template, **{t: t for t in required})
+    except Exception as exc:  # KeyError, ValueError, and whatever a field invents
+        detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        raise ConfigError(
+            f"secret_naming: {key!r} template {template!r} asks for a field mien "
+            f"does not substitute into it, so it cannot render a secret name at "
+            f"all ({detail}). mien renders this template with exactly {expected} "
+            f"— nothing else — so a positional field (`{{}}`, `{{0}}`), a token "
+            f"that belongs to the other `secret_naming` template, or one hidden "
+            f"in a nested format spec has no value to stand for. Left in, it "
+            f"takes down every `mien login`, this template's credentials and the "
+            f"other's alike, with a bare exception instead of this message. Use "
+            f"only {expected}. The built-in template is "
+            f"{_BUILTIN_TEMPLATE[key]!r}."
+        ) from exc
 
 
 def _custom_map_from_raw(profile_name: str, value: object) -> dict[str, str]:

@@ -26,8 +26,9 @@ Each variable is exported only into the shell that ran `mien use` / `mien exec` 
 | `OCI_CLI_CONFIG_FILE` | the config file it names | **shared store** |
 | `ATLASSIAN_EMAIL` / `ATLASSIAN_API_TOKEN` / `ATLASSIAN_BASE_URL` | — (values) | per-shell |
 | `NOTION_TOKEN` | — (token value in env) | per-shell |
+| each name in a profile's `custom` block | — (secret value in env) | per-shell |
 
-`mien unset` / `mien-unset` clears exactly these variables from the current shell.
+`mien unset` / `mien-unset` clears exactly these variables from the current shell — the built-ins above plus every `custom` name any profile in the config defines, so switching identities cannot leave one profile's custom credential behind. It reads the config for those names; if the config cannot be read it clears the built-ins and says on stderr that the custom ones may survive.
 
 ## Files
 

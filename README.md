@@ -90,6 +90,7 @@ mien init                               # pick a backend
 mien login personal --service github
 mien login personal --service google --email me@x.com --client-id <id>
 mien login personal --service slack --workspace team-a
+mien login personal --service custom --name ANTHROPIC_API_KEY   # a credential of your own
 ```
 
 `mien discover` is the onboarding shortcut: it inventories the AWS/OCI profiles, gcloud configurations, and GitHub accounts already configured locally, and shows which are bound to a mien profile and which are not — with the `mien login` command to import each:
@@ -267,6 +268,34 @@ A single `**/*github.com/acme-inc/**` glob matches `https://` and `ssh://` remot
 ```
 
 mien never writes git's `user.email` (that's git's includeIf above); it reads `git_email` only so the [guard](#refuse-to-act-as-the-wrong-you) and status line can warn when a commit's `user.email` disagrees with the identity acting here — the case git's own rules can't catch.
+
+## Your own credentials
+
+The seven built-in services are not the whole of an identity. An LLM API key, an npm or PyPI token, a database URL — anything that is one env var carrying one secret — goes in the same profile and arrives the same way:
+
+```bash
+mien login work --service custom --name ANTHROPIC_API_KEY          # hidden prompt, nothing in argv or history
+mien login work --service custom --name NPM_TOKEN --secret-cmd 'op read op://Private/npm/token'
+mien exec  work -- claude -p "review this"                          # arrives as $ANTHROPIC_API_KEY
+mien logout work --service custom --name ANTHROPIC_API_KEY          # deletes the secret, forgets the name
+```
+
+The secret goes to your backend under the usual rendered name (`mien-work-custom-anthropic_api_key`); the profile stores only a **reference** to it:
+
+```jsonc
+"work": {
+  "custom": {
+    "ANTHROPIC_API_KEY": "<backend-ref>",
+    "NPM_TOKEN":         "<backend-ref>"
+  }
+}
+```
+
+That is the difference from `project_env` below, which is for non-secret values only: a `project_env` value is stored verbatim in `config.json` and uploaded verbatim in the backend manifest, while a `custom` value never leaves the backend. `mien status` shows a custom variable as `<set>`; `mien list` and `mien whoami` show the names. There is no `mien token custom` — `token` prints a raw secret on stdout, and `mien exec` is the answer.
+
+Switching profiles clears them. `mien use` unsets every variable mien manages before exporting the new profile's, and that list now includes every `custom` name **any** profile defines — so moving from a profile with an `ANTHROPIC_API_KEY` to one without it leaves the key behind rather than handing one identity's credential to another. (`mien exec`/`run` still layer over the ambient environment without scrubbing, as they always have.)
+
+A name has to be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) — `mien use` writes a script that gets sourced, and a name the shell won't take breaks the loader — and it may not be one of the nineteen variables mien already uses for a built-in service. Both are refused when you log in *and* when the config is parsed, so a hand-edit fails the same way; the collision error names the service it would have fought.
 
 ## Ambient per-project env
 

@@ -23,7 +23,7 @@ def test_emit_use_does_not_leak_secrets_to_stdout(tmp_path, monkeypatch):
         },
         ephemeral_files=[Path("/tmp/mien/x y.json")],
     )
-    out = emit_use(bundle)
+    out = emit_use(bundle, {})
 
     # Critical: the secret value must never appear on stdout. The whole point
     # of routing exports through a 0600 file is that a caller who forgets to
@@ -47,7 +47,7 @@ def test_emit_use_writes_exports_to_a_0600_env_file(tmp_path, monkeypatch):
             "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/mien/x y.json",
         },
     )
-    out = emit_use(bundle)
+    out = emit_use(bundle, {})
     path = _parse_script_path(out)
 
     # mode bits must be owner-only (0o600) so other users on the box can't read.
@@ -72,7 +72,7 @@ def test_emit_use_scrubs_stale_vars_before_exporting(tmp_path, monkeypatch):
         profile_name="personal",
         env={"MIEN_PROFILE": "personal", "GH_TOKEN": "ghp_new"},
     )
-    body = _parse_script_path(emit_use(bundle)).read_text()
+    body = _parse_script_path(emit_use(bundle, {})).read_text()
 
     scrub_line = next(ln for ln in body.splitlines() if ln.startswith("unset "))
     scrubbed = set(scrub_line.removeprefix("unset ").split())
@@ -86,7 +86,7 @@ def test_emit_use_scrubs_stale_vars_before_exporting(tmp_path, monkeypatch):
 
 
 def test_emit_unset_lists_known_vars():
-    out = emit_unset()
+    out = emit_unset({})
     for var in [
         "MIEN_PROFILE",
         "MIEN_EPHEMERAL_DIR",
@@ -112,3 +112,132 @@ def test_known_vars_includes_atlassian():
 def test_known_vars_includes_notion():
     from mien.shell import KNOWN_VARS
     assert "NOTION_TOKEN" in KNOWN_VARS
+
+
+def _profile(name, **kwargs):
+    from mien.config import Profile
+    return Profile(name=name, **kwargs)
+
+
+def test_scrub_vars_is_the_builtins_plus_every_profiles_custom_names():
+    """EVERY profile's, not the activated one's.
+
+    What a scrub has to clear is whatever the shell was carrying before, and that
+    is some *other* profile's set — the one being activated re-exports its own
+    two lines later.
+    """
+    from mien.shell import KNOWN_VARS, custom_vars, scrub_vars
+    profiles = {
+        "work": _profile("work", custom={"ANTHROPIC_API_KEY": "ref://a"}),
+        "personal": _profile("personal", custom={"NPM_TOKEN": "ref://n"}),
+        "bare": _profile("bare"),
+    }
+    assert custom_vars(profiles) == ["ANTHROPIC_API_KEY", "NPM_TOKEN"]
+    assert scrub_vars(profiles) == KNOWN_VARS + ["ANTHROPIC_API_KEY", "NPM_TOKEN"]
+    # No config, or no custom variables anywhere: exactly the built-ins.
+    assert scrub_vars({}) == KNOWN_VARS
+    assert custom_vars({}) == []
+
+
+def test_the_same_custom_name_in_two_profiles_is_listed_once():
+    from mien.shell import custom_vars
+    profiles = {
+        "work": _profile("work", custom={"ANTHROPIC_API_KEY": "ref://w"}),
+        "personal": _profile("personal", custom={"ANTHROPIC_API_KEY": "ref://p"}),
+    }
+    assert custom_vars(profiles) == ["ANTHROPIC_API_KEY"]
+
+
+def test_known_vars_is_derived_from_the_builtin_owner_map():
+    """One source of truth, so a variable added to one is scrubbed by the other."""
+    from mien.shell import BUILTIN_VARS, KNOWN_VARS
+    assert KNOWN_VARS == list(BUILTIN_VARS)
+    assert BUILTIN_VARS["GH_TOKEN"] == "github"
+    assert BUILTIN_VARS["GIT_SSH_COMMAND"] == "github"
+
+
+def test_switching_to_a_profile_without_a_custom_var_still_clears_it():
+    """The cross-profile leak, at the layer that writes the loader.
+
+    `personal` defines no ANTHROPIC_API_KEY, so nothing re-exports it — the only
+    thing standing between one identity's API key and the next identity's shell
+    is that the scrub line names it.
+    """
+    from mien.shell import emit_use
+    bundle = EnvBundle(profile_name="personal", env={"MIEN_PROFILE": "personal"})
+    profiles = {
+        "work": _profile("work", custom={"ANTHROPIC_API_KEY": "ref://a"}),
+        "personal": _profile("personal"),
+    }
+    body = _parse_script_path(emit_use(bundle, profiles)).read_text()
+    scrub_line = next(ln for ln in body.splitlines() if ln.startswith("unset "))
+    assert "ANTHROPIC_API_KEY" in scrub_line.removeprefix("unset ").split()
+    # And it is cleared before anything is exported, or the scrub would wipe the
+    # new profile's own values.
+    assert body.index("unset ") < body.index("export ")
+
+
+def test_a_real_shell_sourcing_the_loader_loses_the_previous_key(tmp_path, monkeypatch):
+    """The same claim, proved by running it rather than by reading it.
+
+    A shell that activated `work` really is carrying ANTHROPIC_API_KEY; after
+    sourcing the loader `mien use personal` writes, it must not be.
+    """
+    import subprocess
+
+    from mien.shell import write_env_script
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    profiles = {
+        "work": _profile("work", custom={"ANTHROPIC_API_KEY": "ref://a"}),
+        "personal": _profile("personal", custom={"NPM_TOKEN": "ref://n"}),
+    }
+    script = write_env_script(
+        EnvBundle(profile_name="personal",
+                  env={"MIEN_PROFILE": "personal", "NPM_TOKEN": "npm-secret"}),
+        profiles,
+    )
+    out = subprocess.run(
+        ["bash", "-c",
+         f'export ANTHROPIC_API_KEY=work-secret; . {script}; '
+         'echo "anthropic=${ANTHROPIC_API_KEY-<unset>}"; '
+         'echo "npm=${NPM_TOKEN-<unset>}"; echo "profile=$MIEN_PROFILE"'],
+        capture_output=True, text=True, check=True,
+    )
+    assert "anthropic=<unset>" in out.stdout, out.stdout
+    # ...while the profile being activated still gets its own.
+    assert "npm=npm-secret" in out.stdout
+    assert "profile=personal" in out.stdout
+
+
+def test_emit_unset_clears_custom_names_too():
+    from mien.shell import emit_unset
+    out = emit_unset({"work": _profile("work", custom={"ANTHROPIC_API_KEY": "ref://a"})})
+    assert "unset ANTHROPIC_API_KEY" in out
+    assert "unset MIEN_PROFILE" in out
+
+
+def test_the_packaged_schema_reference_lists_exactly_the_taken_names():
+    """The one doc claim about this list that goes stale silently.
+
+    `references/schema.md` is what an agent hand-edits a config from, and it
+    enumerates the built-in variables a `custom` name may not collide with. A
+    built-in added to `BUILTIN_VARS` and not to that list would leave the
+    reference telling readers a taken name is free.
+    """
+    import re
+
+    from mien.shell import BUILTIN_VARS
+    doc = (Path(__file__).resolve().parent.parent
+           / "plugins/mien/skills/mien/references/schema.md").read_text()
+    para = next(line for line in doc.splitlines() if "nineteen taken names" in line)
+    # The sentence names every taken variable, and nothing that is not one.
+    assert set(re.findall(r"`([A-Z_][A-Z0-9_]*)`", para)) == set(BUILTIN_VARS)
+    # ...the count it claims is the real one...
+    assert len(BUILTIN_VARS) == 19
+    # ...and each name sits in the group labelled with the service the collision
+    # error attributes it to, so the doc attributes rather than merely lists.
+    attributed = {}
+    for group in re.finditer(r"([^()]*)\(([a-z ]+)\)", para):
+        names, owner = group.group(1), group.group(2)
+        attributed.update({v: owner for v in re.findall(r"`([A-Z_][A-Z0-9_]*)`", names)})
+    assert attributed == BUILTIN_VARS

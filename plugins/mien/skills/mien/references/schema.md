@@ -46,15 +46,16 @@ An option this backend does not read (`"projct"`), or a required one that is mis
 
 A key mien does not recognize — at the top level, inside `secrets_backend` (an option the declared backend does not read), inside `secret_naming`, at profile level, inside any service block (`google`, `github`, a `slack` entry, `aws`, `oci`, `atlassian`, `notion`), or inside a `project_env` entry — is a hard error, not a dropped field. So is a required key that is *missing*, including a required backend option. The load raises `ConfigError`, so one typo anywhere makes the whole config unusable until it is fixed — not just the profile it sits in.
 
-`bootstrap` is the one block held to no key list: it is backend-specific and free-form, so mien checks only that it is a JSON object.
+`bootstrap` is the one block held to no key list: it is backend-specific and free-form, so mien checks only that it is a JSON object. Two blocks have keys *you* name rather than keys mien enumerates — a `project_env` entry's `env` and a profile's `custom`, whose keys are environment variable names — and those are checked against a rule instead of a list: see each section below.
 
 That blast radius is deliberate. Silently dropping the key is the quieter failure and the worse one: `"profles"` at the top level yields a config with *zero* profiles, so every identity disappears and `mien which` resolves to nothing; `"defalt"` in `secret_naming` reverts to the built-in template, so `mien login` writes secrets under a different name than the config declares and anything already stored under the intended name becomes unreachable; `"defualt_for"` discards a directory claim and the directory falls through to some other profile's catch-all glob; `"profil"` in an `aws` block leaves `AWS_PROFILE` unexported and the CLI falls back to its own default account. Nothing warns, the command succeeds, and it succeeds as the wrong person. A misconfigured identity has to fail loudly.
 
-What "fail loudly" costs depends on what the command was about to do. The rule is stated once here, deliberately, rather than as a roster of command names: a roster goes stale the next time a command is added, and this is the rule the code implements — **every command that reads the config fails hard, except the three always-on surfaces below, which fail open and announce.**
+What "fail loudly" costs depends on what the command was about to do. The rule is stated once here, deliberately, rather than as a roster of command names: a roster goes stale the next time a command is added, and this is the rule the code implements — **every command that reads the config fails hard, except the fail-open surfaces below, which do the part they still can and announce the part they cannot.**
 
 - **Failing hard means exit 1.** The command prints the parse error, the config's path, and what that costs you, then stops. No partial degradation: if it loads the config at all — to act as an identity, resolve one, display one, or write one back — a config it cannot understand stops it. Acting on a config mien cannot understand is exactly how the wrong identity acts.
-- **The three exceptions are the always-on display and gate surfaces, and they fail open — exit 0 — but say so.** `mien statusline` and `mien prompt` print a compact red marker (`⚠ mien:config unreadable — run 'mien doctor'`, and `⚠mien:config` for the prompt) on **stdout**, where the identity segment would go, and exit 0: those two render their own stdout, so a message on stderr would leave the segment blank — and a status line that empties out reads as "nothing to report" when in fact mien can no longer tell who you are here. `mien guard` prints `mien: guard is NOT enforcing — config unreadable: <error>` on **stderr** and exits 0 — deliberately, so a broken config never wedges a commit, but never silently: a guard that has stopped guarding without admitting it is the worse failure. Neither surface refuses, and neither goes quiet.
-- **A few commands read no config at all, so a broken one cannot touch them:** `init`, `shell-init`, `status`, `unset`, `preflight`. `init` is the one that matters when you are stuck: it checks only whether the file *exists* and never parses it, so it is the way out of a config too broken to hand-edit. It writes a fresh one over the top — it replaces your profiles, it does not repair them.
+- **The always-on display and gate surfaces fail open — exit 0 — but say so.** `mien statusline` and `mien prompt` print a compact red marker (`⚠ mien:config unreadable — run 'mien doctor'`, and `⚠mien:config` for the prompt) on **stdout**, where the identity segment would go, and exit 0: those two render their own stdout, so a message on stderr would leave the segment blank — and a status line that empties out reads as "nothing to report" when in fact mien can no longer tell who you are here. `mien guard` prints `mien: guard is NOT enforcing — config unreadable: <error>` on **stderr** and exits 0 — deliberately, so a broken config never wedges a commit, but never silently: a guard that has stopped guarding without admitting it is the worse failure. Neither surface refuses, and neither goes quiet.
+- **`mien unset` and `mien status` fail open too, for a different reason.** Both read the config only for variable *names*: the set of variables mien manages is not fixed, because a profile's `custom` block names its own (below). When the config cannot be read they fall back to mien's built-in variables and put the shortfall on **stderr** — `mien: unsetting only mien's built-in variables; any custom variable a profile defines may still be set …  — config unreadable: <error>`. `unset` especially must not exit non-zero: it is eval'd through the `mien-unset` shell function (`clears="$(command mien unset)" || return $?`), so a non-zero exit means the wrapper evals nothing and *nothing at all* is cleared, losing the built-in scrub as well in a shell whose whole purpose was to stop carrying an identity. The message goes to stderr for the same reason — the wrapper captures stdout and evals it.
+- **A few commands read no config at all, so a broken one cannot touch them:** `init`, `shell-init`, `preflight`. `init` is the one that matters when you are stuck: it checks only whether the file *exists* and never parses it, so it is the way out of a config too broken to hand-edit. It writes a fresh one over the top — it replaces your profiles, it does not repair them.
 
 The message names the offending key and lists the valid ones for that block, so the fix is mechanical. **When hand-editing, add only keys enumerated here — the five top-level keys above, `type` plus that backend's own options from the table above, `default` / `slack_token` inside `secret_naming`, and the profile and service keys below.**
 
@@ -83,6 +84,7 @@ Every profile-level key is optional; a service the profile omits (or sets to `nu
 | `oci` | object \| null | OCI CLI profile |
 | `atlassian` | object \| null | Jira/Confluence account |
 | `notion` | object \| null | Notion integration token |
+| `custom` | object | your own credentials, as `"<VAR_NAME>": "<backend-ref>"` |
 | `project_env` | array of objects | ambient env by directory |
 | `default_for` | array of strings | directory globs claiming identity |
 | `owns_remotes` | array of strings | git-remote globs claiming identity |
@@ -165,6 +167,45 @@ All three are required. Atlassian Cloud is HTTP Basic (`email:token`), so the em
 ```
 
 Required when the block is present.
+
+### `custom`
+
+Your own credentials — an LLM API key, an npm or PyPI token, a database URL — delivered as environment variables alongside the built-in services. Each **key is the environment variable name**; each **value is a backend reference, never the secret**:
+
+```jsonc
+"custom": {
+  "ANTHROPIC_API_KEY": "<backend-ref>",
+  "NPM_TOKEN":         "<backend-ref>"
+}
+```
+
+That the value is a reference is the whole point, and it is exactly where `project_env` differs: a `project_env` value is stored verbatim in `config.json` and uploaded verbatim in the backend manifest, so a secret typed there is a secret in two places. A `custom` value points at the backend, so `config.json` and the manifest carry the variable's *name* and a reference, and the secret itself only ever lives in the backend.
+
+Optional, and absent means empty: a profile with no `custom` key, or with `"custom": null` or `"custom": {}`, simply has no custom variables — which is why a config written before this field existed loads unchanged.
+
+**Write it with `mien login`, not by hand**, since the value has to exist in the backend before the reference means anything:
+
+```bash
+mien login  <profile> --service custom --name ANTHROPIC_API_KEY     # hidden prompt
+mien login  <profile> --service custom --name NPM_TOKEN --secret-cmd 'op read op://Private/npm/token'
+mien login  <profile> --service custom --name ANTHROPIC_API_KEY --token-stdin < keyfile
+mien logout <profile> --service custom --name ANTHROPIC_API_KEY     # deletes the secret, forgets the name
+```
+
+`--name` is required with `--service custom` and refused with every other service (silently ignoring it is how someone believes they stored an API key and actually overwrote a github token). `logout` on a name the profile does not have is an error, not a no-op. The secret is read by the same three mechanisms every other service uses — hidden `getpass`, `--token-stdin`, `--secret-cmd` — and there is no fourth.
+
+The backend secret name is rendered from the `secret_naming.default` template with `service` = `custom` and `kind` = the variable name **lower-cased**, so `ANTHROPIC_API_KEY` on profile `work` under the built-in template is `mien-work-custom-anthropic_api_key`.
+
+**A variable name is refused two ways**, at `mien login` time *and* at parse time, so a hand-edited config fails exactly as the CLI would have:
+
+- **It must be a shell identifier** — `[A-Za-z_][A-Za-z0-9_]*`, ASCII only, the same rule as a `project_env` `env` key and for a sharper reason: `mien use` writes a script that gets *sourced*, and a name the shell will not take breaks the loader at that line and abandons the rest of the file, so every variable the profile exports after it silently never happens.
+- **It must not be a variable mien already uses for a built-in service.** Which of the two a shell ends up carrying must not be settled by the order of statements inside mien, so the collision is refused and the error names the service it would fight (`'GH_TOKEN' is the environment variable mien already uses for github`). The nineteen taken names are `MIEN_PROFILE` and `MIEN_EPHEMERAL_DIR` (mien itself); `CLOUDSDK_ACTIVE_CONFIG_NAME`, `CLOUDSDK_CORE_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS` (google); `GH_TOKEN`, `GIT_SSH_COMMAND` (github); `MIEN_SLACK_TOKENS`, `MIEN_SLACK_DEFAULT_TOKEN` (slack); `AWS_PROFILE`, `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (aws); `OCI_CLI_PROFILE`, `OCI_CLI_CONFIG_FILE` (oci); `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`, `ATLASSIAN_BASE_URL` (atlassian); `NOTION_TOKEN` (notion).
+
+A value must be a **string** — `"custom": {"ANTHROPIC_API_KEY": 5}` is `profile 'work': custom: 'ANTHROPIC_API_KEY' must be a backend secret reference string (not the secret itself), got int: 5` — and the block itself must be a JSON object, checked like every other block rather than coerced.
+
+**How it reaches a program.** `mien exec`, `mien run` and `mien use` export each variable with the secret as its value; nothing is written to a file, so there is no path-carrying variable to dereference (`GOOGLE_APPLICATION_CREDENTIALS` and `MIEN_SLACK_TOKENS` are the built-ins that work that way — `custom` deliberately does not). `mien status` shows each custom variable that is set as `<set>` and never its value; `mien list` and `mien whoami` (including `--json`) show the names only. There is deliberately **no `mien token custom`**: `token` prints a raw secret on stdout, which is the surface that leaks into agent transcripts, and `mien exec <profile> -- <cmd>` covers the need.
+
+**The scrub.** `mien use` writes a loader that `unset`s every variable mien manages before exporting the new profile's, and `mien unset` prints the same list. That list is the nineteen built-ins **plus every `custom` name defined by every profile in the config** — every profile, not just the one being activated, because what needs clearing is whatever the shell was carrying *before*. Without that, switching from a profile that defines `ANTHROPIC_API_KEY` to one that does not would leave the first profile's key live in the new profile's shell. `mien exec`/`mien run` still do not scrub — they layer the profile over the ambient environment, as they always have, so a custom variable inherited from elsewhere survives a profile that does not define it.
 
 ### `git_email`
 

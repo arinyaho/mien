@@ -2163,3 +2163,320 @@ def test_env_sync_is_silent_for_scopes_that_survive_zshenv(monkeypatch, tmp_path
     assert "warning" not in res.stderr and "~/.zshrc" not in res.stderr
     ambient = (tmp_path / "config.json").parent / "ambient.zsh"
     assert f'case "$PWD/" in {scope}/*)' in ambient.read_text()
+
+
+def _custom_cfg(tmp_path, monkeypatch, **customs):
+    """A config whose profiles carry `custom` maps: {profile: {VAR: ref}}."""
+    from mien.config import (BackendConfig, Config, Profile, SecretNaming,
+                             save_config)
+    monkeypatch.setenv("MIEN_CONFIG", str(tmp_path / "c.json"))
+    save_config(Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={},
+        secret_naming=SecretNaming(default="mien-{profile}-{service}-{kind}",
+                                   slack_token="s"),
+        profiles={name: Profile(name=name, custom=dict(custom))
+                  for name, custom in customs.items()},
+    ))
+
+
+def test_login_custom_stores_a_ref_and_never_the_secret(runner, mien_cfg, mocker):
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://anthropic"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main,
+        ["login", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY",
+         "--token-stdin"],
+        input="y\nsk-ant-super-secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "stored ANTHROPIC_API_KEY for work" in result.output
+    # The secret goes to the backend under the `default` template, with the
+    # variable name (lower-cased) as the kind.
+    name, payload = backend.put.call_args[0]
+    assert name == "mien-work-custom-anthropic_api_key"
+    assert payload == b"sk-ant-super-secret"
+    # Only the reference lands in the config — this is the whole difference from
+    # `project_env`, whose values are stored verbatim.
+    raw = mien_cfg.read_text()
+    assert "sk-ant-super-secret" not in raw
+    assert json.loads(raw)["profiles"]["work"]["custom"] == {
+        "ANTHROPIC_API_KEY": "ref://anthropic"}
+
+
+def test_the_manifest_carries_the_custom_name_but_not_its_secret(runner, mien_cfg, mocker):
+    """`mien push` uploads config.json, so a secret in it would be uploaded too.
+
+    The real `push_manifest` runs here — mocking it would prove nothing about
+    what it sends.
+    """
+    from mien.manifest import MANIFEST_SECRET_NAME
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://anthropic"
+    mocker.patch("mien.cli.pull_manifest", return_value=None)
+    runner.invoke(main, ["init", "--backend", "gcp_secret_manager",
+                         "--project", "p1", "--bootstrap-email", "me@x.com"])
+    result = runner.invoke(
+        main,
+        ["login", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY",
+         "--token-stdin"],
+        input="y\nsk-ant-super-secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    manifests = [c.args[1] for c in backend.put.call_args_list
+                 if c.args[0] == MANIFEST_SECRET_NAME]
+    assert manifests, backend.put.call_args_list
+    body = manifests[-1].decode("utf-8")
+    assert "sk-ant-super-secret" not in body
+    assert "ANTHROPIC_API_KEY" in body and "ref://anthropic" in body
+
+
+def test_login_custom_requires_a_name(runner, mien_cfg, mocker):
+    mocker.patch("mien.cli.load_backend")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(main, ["login", "work", "--service", "custom"], input="y\n")
+    assert result.exit_code != 0
+    assert "--name is required for --service custom" in result.output
+
+
+@pytest.mark.parametrize("service", ["github", "notion", "slack"])
+def test_login_name_on_another_service_is_an_error_not_a_silent_ignore(
+    runner, mien_cfg, mocker, service
+):
+    """Ignoring it is how someone believes they stored a key and overwrote a token."""
+    mocker.patch("mien.cli.load_backend")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main, ["login", "work", "--service", service, "--name", "ANTHROPIC_API_KEY"],
+        input="y\n",
+    )
+    assert result.exit_code != 0
+    assert "--name is only meaningful with --service custom" in result.output
+    assert f"--service {service} has no such name" in result.output
+
+
+@pytest.mark.parametrize("name, expect", [
+    ("2FA", "is not a usable environment variable name"),
+    ("MY VAR", "is not a usable environment variable name"),
+    ("api-key", "is not a usable environment variable name"),
+    ("GH_TOKEN", "already uses for github"),
+    ("AWS_PROFILE", "already uses for aws"),
+    ("MIEN_PROFILE", "already uses for mien itself"),
+])
+def test_login_custom_refuses_an_unusable_name_before_reading_a_secret(
+    runner, mien_cfg, mocker, name, expect
+):
+    """Refused at the flag, and refused before anything is stored or prompted."""
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main, ["login", "work", "--service", "custom", "--name", name,
+               "--token-stdin"],
+        input="y\nsk-ant-super-secret\n",
+    )
+    assert result.exit_code != 0
+    assert expect in result.output
+    backend.put.assert_not_called()
+    # And the flag error blames the flag, not the config it never read.
+    assert "The config is at" not in result.output
+
+
+def test_login_custom_composes_several_variables_on_one_profile(runner, mien_cfg, mocker):
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.side_effect = ["ref://anthropic", "ref://npm"]
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    runner.invoke(main, ["login", "work", "--service", "custom", "--name",
+                         "ANTHROPIC_API_KEY", "--token-stdin"], input="y\nsk-a\n")
+    result = runner.invoke(main, ["login", "work", "--service", "custom", "--name",
+                                  "NPM_TOKEN", "--token-stdin"], input="npm-t\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(mien_cfg.read_text())["profiles"]["work"]["custom"] == {
+        "ANTHROPIC_API_KEY": "ref://anthropic", "NPM_TOKEN": "ref://npm"}
+
+
+def test_login_custom_accepts_a_secret_cmd_reference(runner, mien_cfg, mocker):
+    """The existing secret-reading path, unchanged — no new way to supply one."""
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://anthropic"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main, ["login", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY",
+               "--secret-cmd", "printf sk-from-vault"],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert backend.put.call_args[0][1] == b"sk-from-vault"
+
+
+def test_logout_custom_deletes_the_secret_and_forgets_the_name(runner, tmp_path, monkeypatch, mocker):
+    _custom_cfg(tmp_path, monkeypatch,
+                work={"ANTHROPIC_API_KEY": "ref://a", "NPM_TOKEN": "ref://n"})
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    result = CliRunner().invoke(
+        main, ["logout", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY"])
+    assert result.exit_code == 0, result.output
+    assert "removed custom variable ANTHROPIC_API_KEY from work" in result.output
+    backend.delete.assert_called_once_with("ref://a")
+    payload = json.loads((tmp_path / "c.json").read_text())
+    assert payload["profiles"]["work"]["custom"] == {"NPM_TOKEN": "ref://n"}
+
+
+def test_logout_custom_requires_a_name(runner, tmp_path, monkeypatch, mocker):
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    mocker.patch("mien.cli.load_backend")
+    result = CliRunner().invoke(main, ["logout", "work", "--service", "custom"])
+    assert result.exit_code != 0
+    assert "--name is required for --service custom" in result.output
+
+
+def test_logout_custom_names_a_variable_the_profile_does_not_have(
+    runner, tmp_path, monkeypatch, mocker
+):
+    """"removed" would be a lie about a credential, so a typo fails instead."""
+    _custom_cfg(tmp_path, monkeypatch, work={"NPM_TOKEN": "ref://n"})
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    result = CliRunner().invoke(
+        main, ["logout", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY"])
+    assert result.exit_code != 0
+    assert "has no custom variable 'ANTHROPIC_API_KEY'" in result.output
+    assert "it has: NPM_TOKEN" in result.output
+    backend.delete.assert_not_called()
+
+
+def test_use_clears_a_custom_var_the_new_profile_does_not_define(
+    tmp_path, monkeypatch, mocker
+):
+    """The cross-profile leak, end to end through the CLI.
+
+    `work` defines ANTHROPIC_API_KEY and `personal` does not, so switching to
+    `personal` in a shell that activated `work` must clear it — otherwise one
+    identity hands its API key to another, which is the thing mien exists to stop.
+    """
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    _custom_cfg(tmp_path, monkeypatch,
+                work={"ANTHROPIC_API_KEY": "ref://a"}, personal={})
+    mocker.patch("mien.cli.load_backend")
+    result = CliRunner().invoke(main, ["use", "personal"])
+    assert result.exit_code == 0, result.output
+    script = Path(result.output.strip().split("'")[1])
+    scrub = next(ln for ln in script.read_text().splitlines()
+                 if ln.startswith("unset "))
+    assert "ANTHROPIC_API_KEY" in scrub.split()
+
+
+def test_use_exports_a_custom_var_without_printing_it(tmp_path, monkeypatch, mocker):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    mocker.patch("mien.cli.load_backend").return_value.get.return_value = b"sk-secret\n"
+    result = CliRunner().invoke(main, ["use", "work"])
+    assert result.exit_code == 0, result.output
+    assert "sk-secret" not in result.output
+    body = Path(result.output.strip().split("'")[1]).read_text()
+    assert "export ANTHROPIC_API_KEY='sk-secret'" in body
+
+
+def test_unset_clears_custom_vars_named_by_any_profile(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch,
+                work={"ANTHROPIC_API_KEY": "ref://a"}, personal={"NPM_TOKEN": "ref://n"})
+    result = CliRunner().invoke(main, ["unset"])
+    assert result.exit_code == 0, result.output
+    assert "unset ANTHROPIC_API_KEY" in result.output
+    assert "unset NPM_TOKEN" in result.output
+    assert "unset MIEN_PROFILE" in result.output
+
+
+def test_unset_on_a_broken_config_clears_the_builtins_and_says_what_it_missed(
+    tmp_path, monkeypatch
+):
+    """Fail open, and never quietly.
+
+    `mien-unset` evals this command's stdout (`clears="$(command mien unset)" ||
+    return $?`), so exiting non-zero would mean nothing at all is cleared — the
+    built-in scrub lost too. It clears what it can and puts the shortfall on
+    stderr, which the wrapper does not capture.
+    """
+    cfg = tmp_path / "c.json"
+    cfg.write_text('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+                   ' "profiles": {"work": {"custm": {}}}}')
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+    result = CliRunner().invoke(main, ["unset"])
+    assert result.exit_code == 0, result.stderr
+    assert "unset MIEN_PROFILE" in result.stdout
+    assert "unset GH_TOKEN" in result.stdout
+    assert "config unreadable" in result.stderr
+    assert "custom variable" in result.stderr and "may still be set" in result.stderr
+    # The announcement must not reach stdout: the wrapper evals that.
+    assert "config unreadable" not in result.stdout
+
+
+def test_status_shows_a_custom_var_as_set_never_its_value(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    monkeypatch.setenv("MIEN_PROFILE", "work")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-super-secret")
+    result = CliRunner().invoke(main, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "ANTHROPIC_API_KEY=<set>" in result.output
+    assert "sk-ant-super-secret" not in result.output
+
+
+def test_status_omits_a_custom_var_that_is_not_set(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    monkeypatch.setenv("MIEN_PROFILE", "work")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = CliRunner().invoke(main, ["status"])
+    assert "ANTHROPIC_API_KEY" not in result.output
+
+
+def test_status_on_a_broken_config_still_reports_and_says_what_it_cannot_name(
+    tmp_path, monkeypatch
+):
+    cfg = tmp_path / "c.json"
+    cfg.write_text('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+                   ' "profiles": {"work": {"custm": {}}}}')
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+    monkeypatch.setenv("MIEN_PROFILE", "work")
+    monkeypatch.setenv("GH_TOKEN", "ghp_x")
+    result = CliRunner().invoke(main, ["status"])
+    assert result.exit_code == 0, result.stderr
+    assert "active: work" in result.stdout
+    assert "GH_TOKEN=<set>" in result.stdout
+    assert "config unreadable" in result.stderr
+
+
+def test_list_and_whoami_show_custom_names_only(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch,
+                work={"ANTHROPIC_API_KEY": "ref://a", "NPM_TOKEN": "ref://n"})
+    runner = CliRunner()
+    listing = runner.invoke(main, ["list"])
+    assert listing.exit_code == 0, listing.output
+    assert "custom:[ANTHROPIC_API_KEY, NPM_TOKEN]" in listing.output
+    assert "ref://a" not in listing.output
+
+    card = runner.invoke(main, ["whoami", "work"])
+    assert card.exit_code == 0, card.output
+    assert "ANTHROPIC_API_KEY, NPM_TOKEN" in card.output
+    assert "ref://a" not in card.output
+
+    as_json = runner.invoke(main, ["whoami", "work", "--json"])
+    assert as_json.exit_code == 0, as_json.output
+    data = json.loads(as_json.output)
+    assert data["custom"] == ["ANTHROPIC_API_KEY", "NPM_TOKEN"]
+    assert "ref://a" not in as_json.output
+
+
+def test_a_profile_with_no_custom_vars_says_nothing_about_them(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch, work={})
+    runner = CliRunner()
+    assert "custom" not in runner.invoke(main, ["list"]).output
+    assert "custom" not in runner.invoke(main, ["whoami", "work"]).output
+    assert json.loads(runner.invoke(main, ["whoami", "work", "--json"]).output)["custom"] == []
+
+
+def test_token_has_no_custom_service(runner, tmp_path, monkeypatch):
+    """`token` prints a raw secret on stdout; `exec` covers this need instead."""
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    result = CliRunner().invoke(main, ["token", "custom", "--profile", "work"])
+    assert result.exit_code != 0
+    assert "custom" in result.output  # click's invalid-choice message

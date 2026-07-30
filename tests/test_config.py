@@ -1106,3 +1106,121 @@ def test_a_serialized_slack_workspace_still_carries_a_null_team_id():
     back = deserialize_config(serialize_config(cfg)).profiles["work"].slack
     assert back == cfg.profiles["work"].slack
     assert not hasattr(back[0], "team_id")
+
+
+def _raw_with_custom(value) -> dict:
+    return {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+            "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+            "profiles": {"work": {"custom": value}}}
+
+
+def test_a_config_with_no_custom_block_loads_unchanged():
+    """The field is additive: every config written before it still loads.
+
+    `custom` has a default_factory, so absence is an empty map — not a missing
+    required key, which is what a bare annotation would have made it, and which
+    would have made every existing config unloadable on upgrade.
+    """
+    raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+           "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+           "profiles": {"p": {"github": None}, "q": {}}}
+    cfg = deserialize_config(raw)
+    assert cfg.profiles["p"].custom == {}
+    assert cfg.profiles["q"].custom == {}
+    # And an explicit null is absence too, like every other optional block.
+    assert deserialize_config(_raw_with_custom(None)).profiles["work"].custom == {}
+    assert deserialize_config(_raw_with_custom({})).profiles["work"].custom == {}
+
+
+def test_custom_round_trips_as_names_pointing_at_refs():
+    cfg = Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        profiles={"work": Profile(name="work", custom={
+            "ANTHROPIC_API_KEY": "ref://mien-work-custom-anthropic_api_key",
+            "NPM_TOKEN": "ref://mien-work-custom-npm_token",
+        })},
+    )
+    written = json.loads(serialize_config(cfg))["profiles"]["work"]["custom"]
+    assert written == {
+        "ANTHROPIC_API_KEY": "ref://mien-work-custom-anthropic_api_key",
+        "NPM_TOKEN": "ref://mien-work-custom-npm_token",
+    }
+    assert deserialize_config(serialize_config(cfg)) == cfg
+
+
+@pytest.mark.parametrize("value, expect", [
+    # A name that is not a shell identifier breaks the loader script `mien use`
+    # writes: sourcing it fails at that line and abandons the rest of the file,
+    # so every later export — the whole rest of the identity — silently vanishes.
+    ({"2FA": "ref://x"},
+     r"profile 'work': custom: '2FA' is not a usable environment variable name"),
+    ({"MY VAR": "ref://x"},
+     r"profile 'work': custom: 'MY VAR' is not a usable environment variable name"),
+    ({"": "ref://x"},
+     r"profile 'work': custom: '' is not a usable environment variable name"),
+    # A collision with a built-in must not be resolved by whichever `build_env`
+    # branch happens to run last.
+    ({"GH_TOKEN": "ref://x"},
+     r"profile 'work': custom: 'GH_TOKEN' is the environment variable mien "
+     r"already uses for github"),
+    ({"AWS_SECRET_ACCESS_KEY": "ref://x"}, r"already uses for aws"),
+    ({"NOTION_TOKEN": "ref://x"}, r"already uses for notion"),
+    ({"MIEN_PROFILE": "ref://x"}, r"already uses for mien itself"),
+    # The value is a REFERENCE, and a non-string one dies in `backend.get` deep
+    # inside `mien use`, long after the config that named it.
+    ({"ANTHROPIC_API_KEY": 5},
+     r"profile 'work': custom: 'ANTHROPIC_API_KEY' must be a backend secret "
+     r"reference string \(not the secret itself\), got int: 5"),
+    ({"ANTHROPIC_API_KEY": None}, r"must be a backend secret reference string"),
+    ({"ANTHROPIC_API_KEY": ["ref://x"]}, r"must be a backend secret reference string"),
+    # Shape, like every other block: checked, never coerced.
+    ([{"ANTHROPIC_API_KEY": "ref://x"}],
+     r"profile 'work': custom must be a JSON object, got list"),
+    ("ANTHROPIC_API_KEY", r"profile 'work': custom must be a JSON object, got str"),
+])
+def test_a_bad_custom_block_is_refused_at_parse_time(value, expect):
+    """A hand-edited config fails exactly as `mien login` would have.
+
+    Both gates exist because either alone leaves the other open: the CLI cannot
+    stop an editor, and the parser cannot stop a name being written in the first
+    place. `ConfigError` specifically, so the fail-open surfaces announce rather
+    than exiting in silence.
+    """
+    with pytest.raises(ConfigError, match=expect):
+        deserialize_config(_raw_with_custom(value))
+
+
+def test_a_custom_collision_message_points_at_the_builtin_login():
+    """The remedy names the command that stores the built-in it would fight."""
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_custom({"ATLASSIAN_API_TOKEN": "ref://x"}))
+    assert "--service atlassian" in str(exc.value)
+
+
+def test_every_builtin_variable_is_refused_as_a_custom_name():
+    """Derived from the same map the scrub is, so a new built-in is covered too."""
+    from mien.shell import BUILTIN_VARS
+    for var in BUILTIN_VARS:
+        with pytest.raises(ConfigError, match="already uses for"):
+            deserialize_config(_raw_with_custom({var: "ref://x"}))
+
+
+def test_a_custom_name_is_a_known_profile_key_not_an_unknown_one():
+    """`custom` is accepted at profile level; a typo of it is still fatal."""
+    cfg = deserialize_config(_raw_with_custom({"ANTHROPIC_API_KEY": "ref://x"}))
+    assert cfg.profiles["work"].custom == {"ANTHROPIC_API_KEY": "ref://x"}
+    with pytest.raises(ConfigError, match="unknown key 'custm'"):
+        deserialize_config({"$schema_version": 1,
+                            "secrets_backend": {"type": "keyring"},
+                            "profiles": {"work": {"custm": {"X": "ref://x"}}}})
+
+
+def test_a_collision_with_miens_own_variable_suggests_no_login_command():
+    """There is no `--service mien itself`, so the remedy must not invent one."""
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_custom({"MIEN_EPHEMERAL_DIR": "ref://x"}))
+    assert "already uses for mien itself" in str(exc.value)
+    assert "Pick another name." in str(exc.value)
+    assert "--service" not in str(exc.value)

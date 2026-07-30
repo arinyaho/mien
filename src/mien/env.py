@@ -105,4 +105,12 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
         token = backend.get(profile.notion.api_token_ref).decode("utf-8").strip()
         bundle.env["NOTION_TOKEN"] = token
 
+    # The user's own credentials, each delivered under the variable name they
+    # chose. Last, but the order carries no meaning: a custom name may not
+    # collide with a built-in's (refused at login and at parse time), so nothing
+    # here can overwrite a built-in — which is why the collision is refused
+    # rather than resolved by statement order.
+    for var, ref in profile.custom.items():
+        bundle.env[var] = backend.get(ref).decode("utf-8").strip()
+
     return bundle

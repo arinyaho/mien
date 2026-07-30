@@ -100,6 +100,14 @@ class Profile:
     oci: OCIService | None = None
     atlassian: AtlassianService | None = None
     notion: NotionService | None = None
+    # The user's own credentials, delivered as environment variables: each key is
+    # the variable name, each value a backend REFERENCE to the secret — never the
+    # secret. That is what keeps this block safe to store in config.json and to
+    # upload as the shared manifest, and it is exactly where `project_env` differs
+    # (its values are stored and uploaded verbatim, so it is not secret-safe).
+    # A default_factory, so a config written before this field existed loads
+    # unchanged with no custom variables.
+    custom: dict[str, str] = field(default_factory=dict)
     project_env: list[ProjectEnvScope] = field(default_factory=list)
     # Directory globs this profile claims as its default identity. Kept separate
     # from project_env: that maps directories to environment values, this maps
@@ -240,6 +248,7 @@ def _config_to_dict(cfg: Config) -> dict:
             "oci": asdict(prof.oci) if prof.oci else None,
             "atlassian": asdict(prof.atlassian) if prof.atlassian else None,
             "notion": asdict(prof.notion) if prof.notion else None,
+            "custom": dict(prof.custom),
             "project_env": [asdict(s) for s in prof.project_env],
             "default_for": list(prof.default_for),
             "owns_remotes": list(prof.owns_remotes),
@@ -355,6 +364,95 @@ def _object_list_from_raw(where: str, value: object) -> list[dict]:
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def _check_env_name(where: str, key: object, example: str) -> None:
+    """One rule for what may stand on the left of ``export NAME=...``.
+
+    Shared by every block whose keys become environment variables -- a
+    ``project_env`` entry's ``env`` and a profile's ``custom`` -- so a name one
+    accepts is a name the other accepts, and the wording cannot drift. ``example``
+    is each caller's own, because a good example for one is a *refused* name for
+    the other: ``AWS_PROFILE`` is the canonical ``project_env`` key and a
+    collision with mien's built-in aws variable as a ``custom`` name.
+
+    A non-string key cannot come from JSON, whose keys are always strings, but
+    ``deserialize_config`` also accepts an already-parsed ``dict``; the
+    ``isinstance`` here is what keeps the check itself from dying on one.
+    """
+    if not isinstance(key, str) or not _ENV_NAME_RE.fullmatch(key):
+        raise ConfigError(
+            f"{where}: {key!r} is not a usable environment variable name. "
+            f"Expected letters, digits and underscores, not starting with a "
+            f"digit (e.g. {example!r})."
+        )
+
+
+def check_custom_var_name(where: str, name: object) -> None:
+    """Validate one ``custom`` variable name, for both readers of the rule.
+
+    Called from the config parser AND from ``mien login --service custom --name``,
+    so a name the CLI accepts can never be one the parser then refuses -- which
+    would be a config mien wrote and mien cannot load. ``where`` is the caller's
+    own label (``profile 'work': custom``, ``--name``) so the message reads right
+    in a config error and in a flag error alike.
+
+    Two ways a name is refused:
+
+    - **Not a shell identifier.** ``mien use`` writes a script that gets sourced,
+      so a malformed name breaks the loader itself -- worse here than in
+      ``project_env``, since the same script carries every variable the profile
+      exports and sourcing abandons the file at the failing line.
+    - **Already a built-in's variable.** ``build_env`` fills one dict, built-ins
+      first and customs last, so a collision would let the custom value quietly
+      overwrite the profile's real ``GH_TOKEN`` -- and would do the opposite if
+      the order were ever reversed. Which of the two credentials a shell ends up
+      carrying must not be settled by statement order, so it is refused and the
+      message names the service it would fight.
+    """
+    _check_env_name(where, name, "ANTHROPIC_API_KEY")
+    # Imported here, not at module scope: `mien.shell` imports `mien.env`, which
+    # imports this module, so a top-level import would be a cycle. Same shape as
+    # `ensure_known_backend_options` below, and reached only for a config that
+    # actually declares a custom variable.
+    from mien.shell import BUILTIN_VARS, MIEN_INTERNAL_OWNER
+    owner = BUILTIN_VARS.get(name)
+    if owner:
+        # No `--service` to point at for mien's own bookkeeping variables, so the
+        # remedy stops at "pick another name" rather than naming a command that
+        # does not exist.
+        remedy = "Pick another name." if owner == MIEN_INTERNAL_OWNER else (
+            f"Pick another name, or use `mien login <profile> --service {owner} "
+            f"...` if that built-in is what you meant."
+        )
+        raise ConfigError(
+            f"{where}: {name!r} is the environment variable mien already uses for "
+            f"{owner}. A custom credential cannot share a name with a built-in "
+            f"one — which of the two a shell ends up carrying must not be decided "
+            f"silently. {remedy}"
+        )
+
+
+def _custom_map_from_raw(profile_name: str, value: object) -> dict[str, str]:
+    """Validate a profile's ``custom`` map -- shape, names AND values.
+
+    ``custom`` is a plain dict rather than a dataclass, so none of the
+    block-level machinery above reaches inside it: without this, a hand-edited
+    ``"custom": {"2FA": 5}`` would parse clean and then break the loader script
+    ``mien use`` writes. Values are backend references, checked only for being
+    strings -- a non-string one dies in ``backend.get`` deep inside ``mien use``,
+    long after the config that named it.
+    """
+    where = f"profile {profile_name!r}: custom"
+    env = _optional_mapping_from_raw(where, value)
+    for key, item in env.items():
+        check_custom_var_name(where, key)
+        if not isinstance(item, str):
+            raise ConfigError(
+                f"{where}: {key!r} must be a backend secret reference string "
+                f"(not the secret itself), got {type(item).__name__}: {item!r}"
+            )
+    return dict(env)
+
+
 def _env_map_from_raw(where: str, value: object) -> dict[str, str]:
     """Validate a ``project_env`` entry's ``env`` map -- shape, keys AND values.
 
@@ -383,18 +481,11 @@ def _env_map_from_raw(where: str, value: object) -> dict[str, str]:
       a word anywhere, which is the wrong-account-in-silence ending this parser
       exists to prevent.
 
-    A non-string key cannot come from JSON, whose keys are always strings, but
-    ``deserialize_config`` also accepts an already-parsed ``dict``; the
-    ``isinstance`` here is what keeps the check itself from dying on one.
+    The name half is ``_check_env_name``, shared with ``custom``.
     """
     env = _optional_mapping_from_raw(where, value)
     for key, item in env.items():
-        if not isinstance(key, str) or not _ENV_NAME_RE.fullmatch(key):
-            raise ConfigError(
-                f"{where}: {key!r} is not a usable environment variable name. "
-                f"Expected letters, digits and underscores, not starting with a "
-                f"digit (e.g. 'AWS_PROFILE')."
-            )
+        _check_env_name(where, key, "AWS_PROFILE")
         if not isinstance(item, str):
             raise ConfigError(
                 f"{where}: {key!r} must be a string, got "
@@ -823,10 +914,11 @@ def _config_from_dict(raw: dict) -> Config:
             {f.name for f in dc_fields(Profile)} - {"name"},
             tolerated=_RETIRED_PROFILE_KEYS,
         )
-        # The profile's own scalar leaves, `git_email` today. Its list fields are
-        # skipped here because each already has a validator that says more than
-        # "a list" (`_glob_list_from_raw`, `_object_list_from_raw`); a new scalar
-        # profile field is covered the moment it is declared.
+        # The profile's own scalar leaves, `git_email` today. Its list and dict
+        # fields are skipped here because each already has a validator that says
+        # more than "a list"/"a JSON object" (`_glob_list_from_raw`,
+        # `_object_list_from_raw`, `_custom_map_from_raw`); a new scalar profile
+        # field is covered the moment it is declared.
         _check_leaf_values(f"profile {name!r}", p, Profile, scalars_only=True)
         google = _service_from_raw(GoogleService, name, "google", p)
         github = _service_from_raw(GitHubService, name, "github", p)
@@ -883,6 +975,7 @@ def _config_from_dict(raw: dict) -> Config:
             oci=oci,
             atlassian=atlassian,
             notion=notion,
+            custom=_custom_map_from_raw(name, p.get("custom")),
             project_env=project_env,
             default_for=_glob_list_from_raw(
                 name, "default_for", "directory", p.get("default_for"), "*/Projects/acme"),

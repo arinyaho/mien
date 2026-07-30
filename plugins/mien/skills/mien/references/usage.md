@@ -31,6 +31,26 @@ mien login personal --service notion
 # paste a Notion integration token
 ```
 
+## Add a credential of your own (any single env var)
+
+An LLM API key, an npm/PyPI token, a database URL — anything that is one
+environment variable carrying one secret:
+
+```bash
+mien login personal --service custom --name ANTHROPIC_API_KEY
+# paste the key (hidden prompt)
+
+mien exec personal -- claude -p "…"        # arrives as $ANTHROPIC_API_KEY
+mien logout personal --service custom --name ANTHROPIC_API_KEY
+```
+
+`--name` is the variable name and must be a shell identifier that is not already
+one of mien's built-ins (`GH_TOKEN`, `AWS_PROFILE`, `NOTION_TOKEN`, …); the
+collision is refused and names the service it would fight. The config stores only
+a reference, so the secret stays in the backend. `mien status` reports the
+variable as `<set>`, never its value, and there is no `mien token custom` —
+`mien exec` is the interface.
+
 ## Activate (interactive shell)
 
 ```bash
@@ -144,6 +164,7 @@ file into `--token-stdin` — the path appears in history, the secret does not:
 ```bash
 mien login work --service slack --workspace team-a --token-stdin < ./slack-key.txt
 mien login work --service github --username u --token-stdin < ~/tokens/gh-work
+mien login work --service custom --name ANTHROPIC_API_KEY --token-stdin < ~/tokens/anthropic
 ```
 
 Delete the file afterward if it was only a hand-off (`rm ./slack-key.txt`); the
@@ -160,6 +181,8 @@ mien login work --service github --username u \
   --secret-cmd 'op read op://Private/github-work/token'
 mien login work --service aws --access-key-id AKIA... \
   --secret-cmd 'gcloud secrets versions access latest --secret=aws-work'
+mien login work --service custom --name NPM_TOKEN \
+  --secret-cmd 'op read op://Private/npm-work/token'
 ```
 
 Equivalently, pipe the manager's output into `--token-stdin`

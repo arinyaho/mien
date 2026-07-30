@@ -38,7 +38,7 @@ Treat the config file and the backend manifest as trusted input. Do not import a
 
 | Location | Mode | Contents | Removed by |
 |---|---|---|---|
-| `~/.config/mien/config.json` (override with `$MIEN_CONFIG`) | 0600 | Backend type and options, bootstrap account, secret-name templates, per-profile identifiers and **references**. No secret value, with one exception: `project_env` values are stored verbatim, so a secret typed there lands here | nothing |
+| `~/.config/mien/config.json` (override with `$MIEN_CONFIG`) | 0600 | Backend type and options, bootstrap account, secret-name templates, per-profile identifiers and **references** — including a `custom` block's variable names and the reference each points at, never its secret. No secret value, with one exception: `project_env` values are stored verbatim, so a secret typed there lands here | nothing |
 | `~/.config/mien/ambient.zsh` | 0600 | Generated `case` blocks exporting each profile's `project_env` values | rewritten by `mien env sync` |
 | `~/.zshenv` (a marked region) | 0600 | One line sourcing `ambient.zsh` | nothing |
 | `~/.config/mien/allowed.json` | 0600 | Approved `.mien` declarations (declaration path → profile). No secret | edited by `mien allow` / `mien claim` |
@@ -57,7 +57,7 @@ Beyond the table above, `mien` writes nowhere else. It never writes to `~/.ssh`,
 
 This is where a secret is most exposed, and it is worth being exact about who can see it.
 
-Variables that carry a **secret value directly**: `GH_TOKEN`, `MIEN_SLACK_DEFAULT_TOKEN`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `ATLASSIAN_API_TOKEN`, `NOTION_TOKEN`.
+Variables that carry a **secret value directly**: `GH_TOKEN`, `MIEN_SLACK_DEFAULT_TOKEN`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `ATLASSIAN_API_TOKEN`, `NOTION_TOKEN`, and every variable named in a profile's `custom` block (that is what the block is for — one name you chose, one secret from the backend).
 
 Variables that carry a **path to a secret**: `GOOGLE_APPLICATION_CREDENTIALS`, `MIEN_SLACK_TOKENS`, and the key path inside `GIT_SSH_COMMAND`.
 
@@ -67,7 +67,7 @@ Once `mien use` has run in a shell, the first group is readable by that shell an
 
 `mien exec` and `mien run` narrow this considerably — the variables exist only for the duration of one child process — which is why they are the recommended form, especially for agents.
 
-`mien exec` and `mien run` do not **scrub**. The profile's variables are layered over the environment you already had. A profile with no AWS identity leaves an ambient `AWS_ACCESS_KEY_ID` untouched, so the child uses it. If you need certainty about a service the profile does not define, clear it yourself or check with that service's own identity command. (`mien use` is the exception: it `unset`s every managed variable before re-exporting the profile's, so activating a second profile in a shell replaces the first cleanly rather than layering over it — the child-process forms cannot, since they build the child env from the ambient one.)
+`mien exec` and `mien run` do not **scrub**. The profile's variables are layered over the environment you already had. A profile with no AWS identity leaves an ambient `AWS_ACCESS_KEY_ID` untouched, so the child uses it — and the same is true of a `custom` variable another profile defines. If you need certainty about a service the profile does not define, clear it yourself or check with that service's own identity command. (`mien use` is the exception: it `unset`s every managed variable before re-exporting the profile's, so activating a second profile in a shell replaces the first cleanly rather than layering over it — the child-process forms cannot, since they build the child env from the ambient one. "Every managed variable" includes every `custom` name defined by *any* profile in the config, not just the one being activated, so switching identities cannot leave one profile's custom credential live in the next one's shell. When the config cannot be read, `mien use` fails outright and `mien unset` clears the built-ins and says on stderr that custom ones may survive.)
 
 ## What stays in your home directory
 

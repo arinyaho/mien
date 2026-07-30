@@ -16,7 +16,8 @@ from mien.ambient import (
     unexpandable_scope_vars,
     write_ambient,
 )
-from mien.backends import UnknownBackendType, ensure_known_backend, load_backend
+from mien.backends import (SecretNotFound, UnknownBackendType,
+                           ensure_known_backend, load_backend)
 from mien.ephemeral import EphemeralStore
 from mien.config import (
     AWSService,
@@ -31,6 +32,7 @@ from mien.config import (
     Profile,
     SecretNaming,
     SlackWorkspace,
+    check_custom_var_name,
     config_path,
     load_config,
     save_config,
@@ -51,8 +53,9 @@ from mien.project import (ensure_gitignored, find_declaration, is_allowed,
 from mien.resolve import (AmbiguousScope, claimed_profile, git_author_email,
                           git_origin_remote, profile_for_email, resolve_profile)
 from mien.verify import Status, probe_aws, probe_github, probe_google, run_probe_safely
-from mien.secret_naming import render_name
-from mien.shell import emit_unset, emit_use, render_shell_init
+from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN, render_name
+from mien.shell import (CAPTURE_MARKER_VARS, custom_vars, emit_unset, emit_use,
+                        render_shell_init)
 from mien.statusline import guard_reason, render_segment
 
 
@@ -100,6 +103,25 @@ def _friendly_backend_message(exc: BaseException) -> str | None:
             "Until mien can read it, it cannot tell which identity is which — so "
             "the status line shows a warning in place of your identity, and `mien "
             "guard` stops enforcing (it says so instead of blocking)."
+        )
+
+    # A reference whose secret is gone. Reached from every surface that builds the
+    # environment (`use`, `exec`, `run`, and `whoami --live`, which builds it to
+    # probe -- each loads every ref the profile names) and from `logout` (deleting
+    # one), and as a traceback it named neither the identity that is now unusable
+    # nor a way out. The exception's own text carries whatever context the raiser
+    # had — `build_env` adds the profile and the variable — and the advice below
+    # is the part that holds wherever the dangling ref came from: a secret deleted
+    # in the backend by hand, or one two references shared.
+    if isinstance(exc, SecretNotFound):
+        return (
+            f"the secrets backend has no secret for a reference mien's config "
+            f"still names: {exc}\n\n"
+            "The secret was removed without the reference, so this profile cannot "
+            "be activated until the two agree again.\n\n"
+            "Store the secret again to make the reference live:\n"
+            "  mien login <profile> --service <service>\n"
+            "  mien login <profile> --service custom --name <VAR>   # a custom variable"
         )
 
     try:
@@ -338,8 +360,8 @@ def init_cmd(
         secrets_backend=backend_cfg,
         bootstrap=bootstrap,
         secret_naming=SecretNaming(
-            default="mien-{profile}-{service}-{kind}",
-            slack_token="mien-{profile}-slack-{workspace}-token",
+            default=BUILTIN_DEFAULT,
+            slack_token=BUILTIN_SLACK_TOKEN,
         ),
         profiles={},
     )
@@ -459,6 +481,33 @@ def shell_init_cmd(shell: str | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+def _profiles_for_vars(consequence: str) -> dict[str, Profile]:
+    """The profile map, for the two surfaces that need only variable NAMES.
+
+    `mien unset` and `mien status` used to read no config at all; they read one
+    now because the set of variables mien manages is no longer fixed — a
+    profile's `custom` block names its own, and only the config knows them.
+
+    So both must survive a config they cannot read, and neither may go quiet
+    about it. `mien unset` is the sharper case: it is eval'd through the
+    `mien-unset` shell wrapper (`clears="$(command mien unset)" || return $?`), so
+    exiting non-zero means the wrapper never evals and NOTHING is cleared — the
+    built-in scrub lost too, in a shell whose whole purpose was to stop carrying
+    an identity. It therefore fails open like `guard` does, and like `guard` it
+    says so: `consequence` is the caller's own "here is what you are not getting"
+    clause, on stderr, which the wrapper does not capture.
+
+    No config at all is not a failure and says nothing: an unconfigured mien has
+    no custom variables to name, and `unset` still clears the built-ins.
+    """
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        click.echo(f"mien: {consequence} — config unreadable: {exc}", err=True)
+        return {}
+    return cfg.profiles if cfg else {}
+
+
 @main.command("list")
 def list_cmd() -> None:
     cfg = _require_config()
@@ -486,6 +535,10 @@ def list_cmd() -> None:
             services.append(f"atlassian:{prof.atlassian.email}")
         if prof.notion:
             services.append("notion")
+        if prof.custom:
+            # Names only. The values are backend references rather than secrets,
+            # but a reference is still a pointer at one and this is a listing.
+            services.append(f"custom:[{', '.join(prof.custom)}]")
         click.echo(f"{name}\t{' '.join(services) or '(empty)'}")
 
 
@@ -496,6 +549,15 @@ def status_cmd() -> None:
         click.echo("no profile active in this shell")
         return
     click.echo(f"active: {active}")
+    # The custom names come from the config, through the same `custom_vars` the
+    # scrub uses, so what `status` reports set and what `unset` clears cannot
+    # disagree. The built-in half is deliberately NOT the scrub list: this is a
+    # display, so it omits mien's own bookkeeping variables and shows only the
+    # ones a person would check — and each secret-bearing one is masked below.
+    customs = custom_vars(_profiles_for_vars(
+        "listing only mien's built-in variables; a custom variable may be set "
+        "in this shell without appearing here, because mien could not read the "
+        "config to learn its name"))
     for var in (
         "CLOUDSDK_ACTIVE_CONFIG_NAME",
         "CLOUDSDK_CORE_PROJECT",
@@ -515,6 +577,11 @@ def status_cmd() -> None:
         if v := os.environ.get(var):
             shown = v if var not in ("GH_TOKEN", "AWS_ACCESS_KEY_ID", "ATLASSIAN_API_TOKEN", "NOTION_TOKEN") else "<set>"
             click.echo(f"  {var}={shown}")
+    for var in customs:
+        # Always `<set>`, never the value: every custom variable exists to carry
+        # a credential, and mien has no way to know which one is harmless.
+        if os.environ.get(var):
+            click.echo(f"  {var}=<set>")
 
 
 def _identity_card(prof: Profile) -> str:
@@ -542,6 +609,8 @@ def _identity_card(prof: Profile) -> str:
         rows.append(("atlassian", f"{prof.atlassian.email} · {prof.atlassian.base_url}"))
     if prof.notion:
         rows.append(("notion", "configured"))
+    if prof.custom:
+        rows.append(("custom", ", ".join(prof.custom)))
     if prof.owns_remotes:
         rows.append(("owns", ", ".join(prof.owns_remotes)))
     if prof.default_for:
@@ -588,6 +657,9 @@ def whoami_cmd(profile: str | None, live: bool, as_json: bool) -> None:
             "oci": {"profile": prof.oci.profile} if prof.oci else None,
             "atlassian": {"email": prof.atlassian.email, "base_url": prof.atlassian.base_url} if prof.atlassian else None,
             "notion": True if prof.notion else None,
+            # Names, not the map: the values are backend references, and this is
+            # the machine-readable form of an identity, not of its storage.
+            "custom": list(prof.custom),
             "owns_remotes": list(prof.owns_remotes),
             "default_for": list(prof.default_for),
         }, indent=2))
@@ -631,9 +703,15 @@ def _whoami_live(cfg: Config, prof: Profile) -> None:
         store.cleanup()
 
     if not results:
+        # Named as what the probes actually require, not as which services exist:
+        # the google probe needs a stored refresh token, so a gcloud-login-only
+        # google lands here *with* a google configured — and a message listing
+        # "google" as supported would read as a contradiction on that profile.
         raise click.ClickException(
-            f"profile {prof.name!r} has no provider that supports live "
-            "verification (github, aws, or google)"
+            f"profile {prof.name!r} has no provider `--live` can probe — that "
+            "needs github, aws, or a google with a stored refresh token "
+            "(`mien login --service google`, not a gcloud-only login) — so this "
+            "is 'could not check', not a wrong identity."
         )
 
     # Services this profile has but --live did not check. Naming them keeps a
@@ -653,6 +731,11 @@ def _whoami_live(cfg: Config, prof: Profile) -> None:
         configured_services.add("atlassian")
     if prof.notion:
         configured_services.add("notion")
+    if prof.custom:
+        # No probe is possible: mien is told the variable name, never what the
+        # credential is for. Named rather than dropped, so a clean report does
+        # not read as "everything verified".
+        configured_services.add("custom")
     unchecked = sorted(configured_services - probed)
 
     click.echo(f"profile {prof.name!r} — live identity check\n")
@@ -724,9 +807,46 @@ def _reject_reserved_secret_name(profile_name: str, secret_naming: SecretNaming)
         )
 
 
+def _custom_var_name(service: str, name: str | None) -> str | None:
+    """Resolve `--name` for `login`/`logout`: required for `custom`, refused elsewhere.
+
+    `--name` is the environment variable a custom credential arrives as, so for
+    every other service it is meaningless — and a meaningless flag that is
+    silently ignored is how someone believes they stored `ANTHROPIC_API_KEY` and
+    actually overwrote their github token. Both halves are errors.
+
+    A ConfigError from the name check is translated rather than allowed to
+    propagate: `MienGroup` would render it with the "the config is at ... until
+    mien can read it" advice, which is false here — the config is fine, the flag
+    is not.
+    """
+    if service != "custom":
+        if name is not None:
+            raise click.ClickException(
+                f"--name is only meaningful with --service custom, where it names "
+                f"the environment variable the secret arrives as. --service "
+                f"{service} has no such name — drop --name, or pass --service "
+                f"custom if a credential of your own is what you meant."
+            )
+        return None
+    if not name:
+        raise click.ClickException(
+            "--name is required for --service custom: it is the environment "
+            "variable the secret arrives as, e.g. --name ANTHROPIC_API_KEY."
+        )
+    try:
+        check_custom_var_name("--name", name)
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return name
+
+
 @main.command("login")
 @click.argument("profile_name")
-@click.option("--service", type=click.Choice(["google", "github", "slack", "aws", "oci", "atlassian", "notion"]), required=True)
+@click.option("--service", type=click.Choice(["google", "github", "slack", "aws", "oci", "atlassian", "notion", "custom"]), required=True)
+@click.option("--name", "custom_name",
+              help="(custom) environment variable the secret is delivered as "
+                   "(e.g. ANTHROPIC_API_KEY). Required for --service custom.")
 @click.option("--workspace", help="Slack workspace label (required for --service slack)")
 @click.option("--email", help="(google) account email")
 @click.option("--username", help="(github) username")
@@ -734,7 +854,7 @@ def _reject_reserved_secret_name(profile_name: str, secret_naming: SecretNaming)
 @click.option("--ssh-key-path", "ssh_key_path", help="(github) register SSH key by path (per-device)")
 @click.option("--ssh-key", "ssh_key", help="(github) read SSH key file and store contents in the secrets backend")
 @click.option("--token-stdin", "token_stdin", is_flag=True,
-              help="(github/slack/aws/atlassian/notion) read the secret from stdin instead of prompting")
+              help="(github/slack/aws/atlassian/notion/custom) read the secret from stdin instead of prompting")
 @click.option("--secret-cmd", "secret_cmd",
               help="Run this command and use its stdout as the secret "
                    "(e.g. 'op read op://Private/item/field'). Keeps the secret out of argv/history.")
@@ -751,6 +871,7 @@ def _reject_reserved_secret_name(profile_name: str, secret_naming: SecretNaming)
 def login_cmd(
     profile_name: str,
     service: str,
+    custom_name: str | None,
     workspace: str | None,
     email: str | None,
     username: str | None,
@@ -769,6 +890,9 @@ def login_cmd(
     atlassian_email: str | None,
     base_url: str | None,
 ) -> None:
+    # Before the config is read: a flag that cannot mean anything is a mistake to
+    # report on its own terms, not one to blame a backend or a config for.
+    var_name = _custom_var_name(service, custom_name)
     cfg = _require_config()
     if profile_name not in cfg.profiles:
         click.confirm(f"Profile {profile_name!r} not found. Create it?", default=False, abort=True)
@@ -989,6 +1113,39 @@ def login_cmd(
         click.echo(f"stored notion identity for {profile_name} at {ref}")
         return
 
+    if service == "custom":
+        # `var_name` is a validated variable name here — non-empty, a shell
+        # identifier, and not a built-in's. See `_custom_var_name`, which is the
+        # only thing that can put a non-None value there.
+        prof = cfg.profiles.get(profile_name) or Profile(name=profile_name)
+        secret = _read_secret(
+            f"Secret for {var_name}", secret_cmd=secret_cmd, from_stdin=token_stdin)
+        # The same `default` template every other service renders through, with
+        # the variable name verbatim as the `kind` —
+        # `mien-work-custom-ANTHROPIC_API_KEY`.
+        #
+        # Verbatim, deliberately: environment variable names are case-sensitive,
+        # so `TOKEN` and `token` are two different variables carrying two
+        # different secrets. Case-folding the kind rendered ONE secret name for
+        # both, so the second login overwrote the first login's secret and the
+        # config kept two names pointing at the survivor — silent credential
+        # destruction, and a dangling ref as soon as either was logged out.
+        # Every backend takes the name as written: GCP secret IDs allow
+        # `[A-Za-z0-9_-]`, and Keychain/keyring match their service+account
+        # attributes case-sensitively.
+        ref = backend.put(
+            render_name(cfg.secret_naming.default, profile=profile_name,
+                        service="custom", kind=var_name),
+            secret.encode("utf-8"),
+        )
+        # Only the reference is stored. That is what keeps config.json and the
+        # backend manifest free of the secret — the way `project_env` is not.
+        prof.custom[var_name] = ref
+        cfg.profiles[profile_name] = prof
+        _save_and_sync(cfg, backend)
+        click.echo(f"stored {var_name} for {profile_name} at {ref}")
+        return
+
 
 def _stdout_is_tty() -> bool:
     """Indirection so tests can flip the heuristic without monkey-patching
@@ -1028,7 +1185,11 @@ def use_cmd(profile_name: str, force_print: bool, owner_pid: int | None) -> None
     # shell's. Attributed to this short-lived process instead, gc would see a
     # dead pid the instant we return and delete credentials still in use.
     bundle = build_env(prof, backend, pid=owner_pid)
-    sys.stdout.write(emit_use(bundle))
+    # Every profile's map, not just this one's: the loader scrubs whatever the
+    # shell was carrying before, which includes custom variables only some OTHER
+    # profile defines. Read from the config already in hand — `use` fails hard on
+    # an unreadable config, so there is no fail-open branch to make here.
+    sys.stdout.write(emit_use(bundle, cfg.profiles))
 
 
 def _profile_fingerprint(prof) -> str:
@@ -1164,7 +1325,17 @@ def env_sync_cmd() -> None:
 
 @main.command("unset")
 def unset_cmd() -> None:
-    sys.stdout.write(emit_unset())
+    """Print the `unset` lines that clear every variable mien manages.
+
+    Meant to be eval'd — the `mien-unset` wrapper from `mien shell-init` does it.
+    The list is the built-ins plus every `custom` variable any profile defines, so
+    it reads the config; when it cannot, it clears the built-ins and says on
+    stderr that the custom ones may survive (see `_profiles_for_vars`).
+    """
+    sys.stdout.write(emit_unset(_profiles_for_vars(
+        "unsetting only mien's built-in variables; any custom variable a profile "
+        "defines may still be set in this shell, because mien could not read the "
+        "config to learn its name")))
 
 
 def _run_as_profile(cfg: Config, prof: Profile, argv: tuple[str, ...]) -> None:
@@ -1598,13 +1769,6 @@ def prompt_cmd() -> None:
 
 _GUARD_OFF = {"off", "0", "false", "no"}
 
-# Environment markers set by agent harnesses that record a command's output.
-# Presence means: anything this process writes to stdout may be captured into a
-# transcript that outlives the command — so printing a raw secret there is not a
-# transient exposure but a durable one. The list is a heuristic and deliberately
-# fails *open*: an unrecognized harness is not detected, so this is a backstop
-# for the common case, never a guarantee.
-_CAPTURE_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MIEN_CAPTURED")
 _CAPTURE_OK = {"capture-ok", "off"}
 
 # What `mien exec` puts in the environment for each service `mien token` prints,
@@ -1649,8 +1813,15 @@ _HTTP_HINT_FOR = {
 
 
 def capture_context() -> str | None:
-    """The harness marker suggesting this command's stdout is being recorded."""
-    for marker in _CAPTURE_MARKERS:
+    """The harness marker suggesting this command's stdout is being recorded.
+
+    Presence-gated: any one marker set means "an agent is driving". The names come
+    from `mien.shell.CAPTURE_MARKER_VARS` rather than a tuple of their own, and
+    that is the point — the same map is what `check_custom_var_name` refuses as a
+    `custom` credential name, so a marker cannot be detected here while the scrub
+    is still free to `unset` it.
+    """
+    for marker in CAPTURE_MARKER_VARS:
         if os.environ.get(marker, "").strip():
             return marker
     return None
@@ -1814,9 +1985,14 @@ def token_cmd(service: str, profile: str | None, force: bool) -> None:
 
 @main.command("logout")
 @click.argument("profile_name")
-@click.option("--service", type=click.Choice(["google", "github", "slack", "aws", "oci", "atlassian", "notion"]), required=True)
+@click.option("--service", type=click.Choice(["google", "github", "slack", "aws", "oci", "atlassian", "notion", "custom"]), required=True)
+@click.option("--name", "custom_name",
+              help="(custom) environment variable to forget (e.g. ANTHROPIC_API_KEY). "
+                   "Required for --service custom.")
 @click.option("--workspace", help="Slack workspace label (required for --service slack)")
-def logout_cmd(profile_name: str, service: str, workspace: str | None) -> None:
+def logout_cmd(profile_name: str, service: str, custom_name: str | None,
+               workspace: str | None) -> None:
+    var_name = _custom_var_name(service, custom_name)
     cfg = _require_config()
     prof = cfg.profiles.get(profile_name)
     if not prof:
@@ -1860,6 +2036,20 @@ def logout_cmd(profile_name: str, service: str, workspace: str | None) -> None:
     elif service == "notion" and prof.notion:
         backend.delete(prof.notion.api_token_ref)
         prof.notion = None
+    elif service == "custom":
+        # `var_name` is non-None for this service — `_custom_var_name` refused the
+        # call otherwise. A name this profile does not have is a typo, and
+        # "removed" would be a lie about a credential — so this fails rather than
+        # reporting a no-op the way an absent `oci` block does.
+        if var_name not in prof.custom:
+            raise click.ClickException(
+                f"profile {profile_name!r} has no custom variable {var_name!r}"
+                + (f" (it has: {', '.join(prof.custom)})" if prof.custom else "")
+            )
+        backend.delete(prof.custom.pop(var_name))
+        _save_and_sync(cfg, backend)
+        click.echo(f"removed custom variable {var_name} from {profile_name}")
+        return
     _save_and_sync(cfg, backend)
     click.echo(f"removed {service} from {profile_name}")
 

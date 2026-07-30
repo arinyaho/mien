@@ -11,6 +11,15 @@ from pathlib import Path
 from types import UnionType
 from typing import Union, get_args, get_origin, get_type_hints
 
+from mien.secret_naming import (
+    BUILTIN_DEFAULT,
+    BUILTIN_SLACK_TOKEN,
+    REQUIRED_TOKENS,
+    TOKEN_SEPARATES,
+    render_name,
+    template_fields,
+)
+
 SCHEMA_VERSION = 1
 
 
@@ -100,6 +109,14 @@ class Profile:
     oci: OCIService | None = None
     atlassian: AtlassianService | None = None
     notion: NotionService | None = None
+    # The user's own credentials, delivered as environment variables: each key is
+    # the variable name, each value a backend REFERENCE to the secret — never the
+    # secret. That is what keeps this block safe to store in config.json and to
+    # upload as the shared manifest, and it is exactly where `project_env` differs
+    # (its values are stored and uploaded verbatim, so it is not secret-safe).
+    # A default_factory, so a config written before this field existed loads
+    # unchanged with no custom variables.
+    custom: dict[str, str] = field(default_factory=dict)
     project_env: list[ProjectEnvScope] = field(default_factory=list)
     # Directory globs this profile claims as its default identity. Kept separate
     # from project_env: that maps directories to environment values, this maps
@@ -172,10 +189,18 @@ def load_config() -> Config | None:
     which identity is which, which is exactly what ConfigError means.
 
     Translated here rather than in each caller so every surface gets it at once
-    — the fail-open ones (status line, prompt, guard) recognize ConfigError as
-    "I have stopped working" and would otherwise swallow an OSError in their
-    catch-all and go quiet, and `_friendly_backend_message` renders it as an
-    actionable error instead of an OSError traceback.
+    — the fail-open ones recognize ConfigError as "I have stopped working" and
+    would otherwise swallow an OSError in their catch-all and go quiet, and
+    `_friendly_backend_message` renders it as an actionable error instead of an
+    OSError traceback.
+
+    Which surfaces those are is not a fixed list: `guard`, the status line and the
+    prompt fail open because they annotate someone else's work rather than doing
+    it, and `mien unset` and `mien status` joined them once they had to read the
+    config for the names of a profile's `custom` variables (see
+    `cli._profiles_for_vars` — `unset` is eval'd through a shell wrapper, so
+    exiting non-zero would clear nothing at all). Every one of them announces the
+    failure on stderr; none of them may go quiet.
     """
     path = config_path()
     try:
@@ -240,6 +265,36 @@ def _config_to_dict(cfg: Config) -> dict:
             "oci": asdict(prof.oci) if prof.oci else None,
             "atlassian": asdict(prof.atlassian) if prof.atlassian else None,
             "notion": asdict(prof.notion) if prof.notion else None,
+            # `custom` is written only when it carries something, and the
+            # omission is deliberate — like the `team_id` null above, it is a
+            # write-side compatibility shim for OLDER readers of this same JSON.
+            #
+            # A mien predating this field rejects unknown *profile* keys hard
+            # ("profile 'plain': unknown key 'custom'"), and that ConfigError
+            # takes the WHOLE manifest down rather than the one profile carrying
+            # the key. Writing `"custom": {}` unconditionally would therefore
+            # cost such a machine every identity it has over a profile that uses
+            # nothing new: `mien sync` fails outright, and `mien init` swallows
+            # it into "(manifest check skipped: ...)", exits 0, and leaves the
+            # empty config it just wrote. Worse, the remedy that failure prints
+            # is `mien push` — which from that machine uploads its own
+            # custom-less config, emptying every profile's `custom` map for
+            # everyone who syncs next.
+            #
+            # Be honest about the shim's reach: it cannot make a profile that
+            # actually uses `custom` readable by a mien that has no such field.
+            # What it buys is that the break stops being fleet-wide the moment
+            # anyone upgrades and becomes confined to the profiles using the
+            # feature.
+            #
+            # Costless for current readers: `Profile.custom` has a
+            # default_factory and the schema documents an absent key as an empty
+            # map, so the key's absence says exactly what `{}` said.
+            #
+            # Drop this once no mien predating `custom` can still read a manifest
+            # written here. As with `team_id`, nothing in the file will tell you;
+            # it is a fact about the fleet.
+            **({"custom": dict(prof.custom)} if prof.custom else {}),
             "project_env": [asdict(s) for s in prof.project_env],
             "default_for": list(prof.default_for),
             "owns_remotes": list(prof.owns_remotes),
@@ -355,6 +410,280 @@ def _object_list_from_raw(where: str, value: object) -> list[dict]:
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def _check_env_name(where: str, key: object, example: str) -> None:
+    """One rule for what may stand on the left of ``export NAME=...``.
+
+    Shared by every block whose keys become environment variables -- a
+    ``project_env`` entry's ``env`` and a profile's ``custom`` -- so a name one
+    accepts is a name the other accepts, and the wording cannot drift. ``example``
+    is each caller's own, because a good example for one is a *refused* name for
+    the other: ``AWS_PROFILE`` is the canonical ``project_env`` key and a
+    collision with mien's built-in aws variable as a ``custom`` name.
+
+    A non-string key cannot come from JSON, whose keys are always strings, but
+    ``deserialize_config`` also accepts an already-parsed ``dict``; the
+    ``isinstance`` here is what keeps the check itself from dying on one.
+    """
+    if not isinstance(key, str) or not _ENV_NAME_RE.fullmatch(key):
+        raise ConfigError(
+            f"{where}: {key!r} is not a usable environment variable name. "
+            f"Expected letters, digits and underscores, not starting with a "
+            f"digit (e.g. {example!r})."
+        )
+
+
+def check_custom_var_name(where: str, name: object) -> None:
+    """Validate one ``custom`` variable name, for both readers of the rule.
+
+    Called from the config parser AND from ``mien login --service custom --name``,
+    so a name the CLI accepts can never be one the parser then refuses -- which
+    would be a config mien wrote and mien cannot load. ``where`` is the caller's
+    own label (``profile 'work': custom``, ``--name``) so the message reads right
+    in a config error and in a flag error alike.
+
+    Four ways a name is refused:
+
+    - **Not a shell identifier.** ``mien use`` writes a script that gets sourced,
+      so a malformed name breaks the loader itself -- worse here than in
+      ``project_env``, since the same script carries every variable the profile
+      exports and sourcing abandons the file at the failing line.
+    - **Already a built-in's variable.** ``build_env`` fills one dict, built-ins
+      first and customs last, so a collision would let the custom value quietly
+      overwrite the profile's real ``GH_TOKEN`` -- and would do the opposite if
+      the order were ever reversed. Which of the two credentials a shell ends up
+      carrying must not be settled by statement order, so it is refused and the
+      message names the service it would fight.
+    - **Shell-critical.** The loader ``unset``s every managed variable and
+      re-``export``s the active profile's, and the scrub list is the union over
+      every profile (``mien.shell.scrub_vars``). A name the shell or mien itself
+      reads as an instruction -- ``PATH``, ``HOME``, ``TMPDIR`` and the rest of
+      ``SHELL_CRITICAL_VARS`` -- therefore wrecks shells that have nothing to do
+      with the profile that named it: one such name in one profile makes every
+      ``mien use`` and every ``mien-unset`` strip it, everywhere. The exact-match
+      here is the whole rule; ``MY_PATH`` and ``PATH_TO_KEY`` are ordinary names.
+    - **An agent-harness capture marker.** Same blast radius, different reason,
+      which is why ``mien.shell.CAPTURE_MARKER_VARS`` is its own map and gets its
+      own message: neither half of the shell-critical rule holds (``unset
+      CLAUDECODE`` breaks nothing, and a credential exported over it still reads
+      as "detected"). What disqualifies it is polarity -- mien reads the marker as
+      a safety signal whose ABSENCE is the permissive state, so the scrub's
+      ``unset`` is what moves it to the unsafe side, silently disarming the
+      refusals in ``mien token`` and ``mien exec``.
+
+    Matching is exact and case-sensitive throughout, like the environment itself.
+    """
+    _check_env_name(where, name, "ANTHROPIC_API_KEY")
+    # Imported here, not at module scope: `mien.shell` imports `mien.env`, which
+    # imports this module, so a top-level import would be a cycle. Same shape as
+    # `ensure_known_backend_options` below, and reached only for a config that
+    # actually declares a custom variable.
+    from mien.shell import (
+        BUILTIN_VARS,
+        CAPTURE_MARKER_VARS,
+        MIEN_INTERNAL_OWNER,
+        SHELL_CRITICAL_VARS,
+    )
+    owner = BUILTIN_VARS.get(name)
+    if owner:
+        # No `--service` to point at for mien's own bookkeeping variables, so the
+        # remedy stops at "pick another name" rather than naming a command that
+        # does not exist.
+        remedy = "Pick another name." if owner == MIEN_INTERNAL_OWNER else (
+            f"Pick another name, or use `mien login <profile> --service {owner} "
+            f"...` if that built-in is what you meant."
+        )
+        raise ConfigError(
+            f"{where}: {name!r} is the environment variable mien already uses for "
+            f"{owner}. A custom credential cannot share a name with a built-in "
+            f"one — which of the two a shell ends up carrying must not be decided "
+            f"silently. {remedy}"
+        )
+    critical = SHELL_CRITICAL_VARS.get(name)
+    if critical:
+        raise ConfigError(
+            f"{where}: {name!r} is {critical}. A custom credential cannot take "
+            f"that over: `mien use` unsets every variable mien manages and "
+            f"re-exports the active profile's, and that list is the union over "
+            f"ALL profiles — so this name would strip {name} in every shell that "
+            f"runs `mien use` or `mien-unset`, whichever profile is active. Pick "
+            f"another name."
+        )
+    marker = CAPTURE_MARKER_VARS.get(name)
+    if marker:
+        raise ConfigError(
+            f"{where}: {name!r} is {marker}. mien reads it to decide whether an "
+            f"agent is driving, and reads its ABSENCE as 'no agent' — so a custom "
+            f"credential cannot take it over: `mien use` unsets every variable "
+            f"mien manages, and that list is the union over ALL profiles, so this "
+            f"name would emit `unset {name}` in every shell that runs `mien use` "
+            f"or `mien-unset`, whichever profile is active. That disarms the "
+            f"refusals that keep `mien token` from printing a secret into a "
+            f"recorded transcript and `mien exec` from running under the wrong "
+            f"identity, and it disarms them silently. Pick another name."
+        )
+
+
+_BUILTIN_TEMPLATE = {"default": BUILTIN_DEFAULT, "slack_token": BUILTIN_SLACK_TOKEN}
+
+
+def _check_secret_name_template(key: str, template: str) -> None:
+    """Require a secret-name template to distinguish what it names.
+
+    ``secret_naming`` is user-editable, and every ``mien login`` renders one of
+    its two templates to decide WHERE a credential is stored. Nothing else keeps
+    those names apart: the "one credential, one secret" property comes entirely
+    from the template spending every token it is rendered with. Drop one --
+    ``"mien-{profile}-{service}"`` is a plausible hand-edit, and a manifest pulled
+    from a shared backend can carry it too -- and two credentials render the same
+    name. `mien login` then stores the second over the first with nothing said,
+    both config entries point at the survivor, and `mien logout` of either deletes
+    the secret the other still references, leaving a profile that cannot be
+    activated at all. That is the same silent credential destruction the
+    verbatim-`kind` rule exists to prevent, reached through a config field instead
+    of through case folding; which of two credentials a shell ends up carrying
+    must not be decided silently either way.
+
+    Two rules, checked in this order, and NEITHER SUBSUMES THE OTHER -- do not
+    delete one as redundant:
+
+    1. STRUCTURE (this template maps two credentials onto one name). Every token
+       the template is rendered with must appear as a *plain* replacement field:
+       no conversion, no format spec, no attribute access, no indexing. This is
+       injectivity, and it is why a probe render is not the check: injectivity is
+       a property of every possible input, so probing ``kind="a"`` against
+       ``kind="b"`` waves through ``"{profile}-{service}-{kind:.1s}"``, and
+       ``{kind:.0s}`` renders perfectly while producing one name for everything --
+       byte-identical to dropping ``{kind}``. A plain field, by contrast, is
+       injective in that token by construction. See
+       ``secret_naming.template_tokens`` for why every decorated form is either
+       useless or a collision.
+
+    2. RENDERABILITY (this template cannot produce a name at all). Every field the
+       template asks for must be one mien actually substitutes into it, and here a
+       probe render IS the check -- a set difference on the field names is not. A
+       nested spec hides an unknown token where the parser's top-level walk never
+       sees it (``{kind:{w}}``), and ``{}`` / ``{0}`` pass any name test and then
+       raise from ``format_map``. Rule 1 already refuses every spec, so what the
+       probe is left holding is the positional forms and any token that belongs to
+       the other template -- ``"...-{kind}-{workspace}"`` in ``default``. Without
+       it those escape ``deserialize_config`` as a bare ``KeyError``/``ValueError``
+       that no fail-open surface recognizes as a config failure, and, because
+       ``cli._reject_reserved_secret_name`` renders BOTH templates on every login,
+       a bad ``slack_token`` alone takes down ``mien login --service github``.
+
+    So: a probe cannot establish injectivity (rule 1's job), and a structural walk
+    cannot establish renderability (rule 2's job). The messages are separate too,
+    because dropping a token and naming a token that does not exist are different
+    mistakes with different fixes.
+
+    Checked at parse time, so it covers every way a template arrives: a
+    hand-edited config file, and `mien sync`/`mien init`'s import of the shared
+    backend manifest, which goes through this same parser. `mien init` needs no
+    check of its own -- it writes the built-in templates and offers no way to type
+    one.
+    """
+    required = REQUIRED_TOKENS[key]
+    expected = ", ".join("{%s}" % t for t in required)
+    try:
+        fields = template_fields(template)
+    except ValueError as exc:
+        # An unbalanced brace. Reported here rather than left to `render_name`,
+        # where it surfaces as a bare ValueError out of whichever command first
+        # stores or reads a secret -- and, since this check now runs on load,
+        # would otherwise escape `deserialize_config` as a non-ConfigError that
+        # the fail-open surfaces do not recognize as a config failure.
+        raise ConfigError(
+            f"secret_naming: {key!r} template {template!r} is not a usable "
+            f"template ({exc}) — mien cannot render a secret name from it. "
+            f"Expected {expected} in some arrangement, e.g. "
+            f"{_BUILTIN_TEMPLATE[key]!r}."
+        ) from exc
+
+    # Rule 1: every required token spent as a bare `{name}`, and no decorated
+    # field anywhere. Refused outright rather than merely not counted, so that an
+    # accepted template is literal text plus plain fields and nothing else.
+    plain = {f.name for f in fields if f.plain}
+    decorated = ", ".join(f.text for f in fields if not f.plain)
+    missing = [t for t in required if t not in plain]
+    if missing:
+        raise ConfigError(
+            f"secret_naming: {key!r} template {template!r} does not use "
+            f"{', '.join('{%s}' % t for t in missing)} as a plain replacement "
+            f"field, so {'; '.join(TOKEN_SEPARATES[t] for t in missing)}. Two "
+            f"credentials then land on one backend secret: the second `mien "
+            f"login` overwrites the first with nothing said, and a later `mien "
+            f"logout` of either deletes the secret the other one still points at."
+            + (
+                f" {decorated} does not count as spending the token: a format "
+                f"spec, a conversion, attribute access or indexing renders "
+                f"something shorter or different, and a shortened token is "
+                f"exactly how two credentials collapse — `{{kind:.1s}}` keeps one "
+                f"character of the name and `{{kind:.0s}}` keeps none."
+                if decorated
+                else ""
+            )
+            + f" Every token mien renders this template with has to appear in it "
+            f"as a bare `{{name}}` — {expected} — in whatever arrangement you "
+            f"like. The built-in template is {_BUILTIN_TEMPLATE[key]!r}."
+        )
+    if decorated:
+        raise ConfigError(
+            f"secret_naming: {key!r} template {template!r} spends {decorated} "
+            f"through a format spec, a conversion, attribute access or indexing. "
+            f"Only a plain replacement field — a bare `{{name}}` — reproduces the "
+            f"token mien renders it with, and mien refuses the decorated forms "
+            f"rather than quietly ignoring them: the tokens are already strings, "
+            f"so `:s` is a no-op, `!r` wraps the name in quotes, a width or fill "
+            f"pads it with spaces, and a precision truncates it (`{{kind:.1s}}` "
+            f"keeps one character of the name, `{{kind:.0s}}` keeps none) — a "
+            f"truncated token renders one secret name for two credentials. Write "
+            f"{expected} as bare fields, plus whatever literal text you like. The "
+            f"built-in template is {_BUILTIN_TEMPLATE[key]!r}."
+        )
+
+    # Rule 2: nothing in the template that mien has no value for. The probe render
+    # uses the token names as their own values -- only renderability is at stake
+    # here, never the shape of the result.
+    try:
+        render_name(template, **{t: t for t in required})
+    except Exception as exc:  # KeyError, ValueError, and whatever a field invents
+        detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        raise ConfigError(
+            f"secret_naming: {key!r} template {template!r} asks for a field mien "
+            f"does not substitute into it, so it cannot render a secret name at "
+            f"all ({detail}). mien renders this template with exactly {expected} "
+            f"— nothing else — so a positional field (`{{}}`, `{{0}}`), a token "
+            f"that belongs to the other `secret_naming` template, or one hidden "
+            f"in a nested format spec has no value to stand for. Left in, it "
+            f"takes down every `mien login`, this template's credentials and the "
+            f"other's alike, with a bare exception instead of this message. Use "
+            f"only {expected}. The built-in template is "
+            f"{_BUILTIN_TEMPLATE[key]!r}."
+        ) from exc
+
+
+def _custom_map_from_raw(profile_name: str, value: object) -> dict[str, str]:
+    """Validate a profile's ``custom`` map -- shape, names AND values.
+
+    ``custom`` is a plain dict rather than a dataclass, so none of the
+    block-level machinery above reaches inside it: without this, a hand-edited
+    ``"custom": {"2FA": 5}`` would parse clean and then break the loader script
+    ``mien use`` writes. Values are backend references, checked only for being
+    strings -- a non-string one dies in ``backend.get`` deep inside ``mien use``,
+    long after the config that named it.
+    """
+    where = f"profile {profile_name!r}: custom"
+    env = _optional_mapping_from_raw(where, value)
+    for key, item in env.items():
+        check_custom_var_name(where, key)
+        if not isinstance(item, str):
+            raise ConfigError(
+                f"{where}: {key!r} must be a backend secret reference string "
+                f"(not the secret itself), got {type(item).__name__}: {item!r}"
+            )
+    return dict(env)
+
+
 def _env_map_from_raw(where: str, value: object) -> dict[str, str]:
     """Validate a ``project_env`` entry's ``env`` map -- shape, keys AND values.
 
@@ -383,18 +712,11 @@ def _env_map_from_raw(where: str, value: object) -> dict[str, str]:
       a word anywhere, which is the wrong-account-in-silence ending this parser
       exists to prevent.
 
-    A non-string key cannot come from JSON, whose keys are always strings, but
-    ``deserialize_config`` also accepts an already-parsed ``dict``; the
-    ``isinstance`` here is what keeps the check itself from dying on one.
+    The name half is ``_check_env_name``, shared with ``custom``.
     """
     env = _optional_mapping_from_raw(where, value)
     for key, item in env.items():
-        if not isinstance(key, str) or not _ENV_NAME_RE.fullmatch(key):
-            raise ConfigError(
-                f"{where}: {key!r} is not a usable environment variable name. "
-                f"Expected letters, digits and underscores, not starting with a "
-                f"digit (e.g. 'AWS_PROFILE')."
-            )
+        _check_env_name(where, key, "AWS_PROFILE")
         if not isinstance(item, str):
             raise ConfigError(
                 f"{where}: {key!r} must be a string, got "
@@ -811,9 +1133,11 @@ def _config_from_dict(raw: dict) -> Config:
     # not the built-in template.
     _check_leaf_values("secret_naming", sn, SecretNaming)
     secret_naming = SecretNaming(
-        default=sn.get("default", "mien-{profile}-{service}-{kind}"),
-        slack_token=sn.get("slack_token", "mien-{profile}-slack-{workspace}-token"),
+        default=sn.get("default", BUILTIN_DEFAULT),
+        slack_token=sn.get("slack_token", BUILTIN_SLACK_TOKEN),
     )
+    _check_secret_name_template("default", secret_naming.default)
+    _check_secret_name_template("slack_token", secret_naming.slack_token)
 
     profiles: dict[str, Profile] = {}
     for name, p in _optional_mapping_from_raw("profiles", raw.get("profiles")).items():
@@ -823,10 +1147,11 @@ def _config_from_dict(raw: dict) -> Config:
             {f.name for f in dc_fields(Profile)} - {"name"},
             tolerated=_RETIRED_PROFILE_KEYS,
         )
-        # The profile's own scalar leaves, `git_email` today. Its list fields are
-        # skipped here because each already has a validator that says more than
-        # "a list" (`_glob_list_from_raw`, `_object_list_from_raw`); a new scalar
-        # profile field is covered the moment it is declared.
+        # The profile's own scalar leaves, `git_email` today. Its list and dict
+        # fields are skipped here because each already has a validator that says
+        # more than "a list"/"a JSON object" (`_glob_list_from_raw`,
+        # `_object_list_from_raw`, `_custom_map_from_raw`); a new scalar profile
+        # field is covered the moment it is declared.
         _check_leaf_values(f"profile {name!r}", p, Profile, scalars_only=True)
         google = _service_from_raw(GoogleService, name, "google", p)
         github = _service_from_raw(GitHubService, name, "github", p)
@@ -883,6 +1208,7 @@ def _config_from_dict(raw: dict) -> Config:
             oci=oci,
             atlassian=atlassian,
             notion=notion,
+            custom=_custom_map_from_raw(name, p.get("custom")),
             project_env=project_env,
             default_for=_glob_list_from_raw(
                 name, "default_for", "directory", p.get("default_for"), "*/Projects/acme"),

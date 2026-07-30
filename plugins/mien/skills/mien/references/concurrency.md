@@ -26,8 +26,13 @@ Each variable is exported only into the shell that ran `mien use` / `mien exec` 
 | `OCI_CLI_CONFIG_FILE` | the config file it names | **shared store** |
 | `ATLASSIAN_EMAIL` / `ATLASSIAN_API_TOKEN` / `ATLASSIAN_BASE_URL` | — (values) | per-shell |
 | `NOTION_TOKEN` | — (token value in env) | per-shell |
+| each name in a profile's `custom` block | — (secret value in env) | per-shell |
 
-`mien unset` / `mien-unset` clears exactly these variables from the current shell.
+`mien unset` / `mien-unset` clears exactly these variables from the current shell — the built-ins above plus every `custom` name any profile in the config defines at that moment, so switching identities does not leave behind a custom credential whose name the config still holds. It reads the config for those names, and that is the limit of the guarantee, in two ways.
+
+If the config cannot be read, it clears the built-ins and says on stderr that the custom ones may survive.
+
+And a name the config no longer holds is no longer on the list. It leaves on `mien logout <profile> --service custom --name <VAR>`, on a rename of that key in the config, or on removal of its profile from the config (by hand, or by a `mien sync` that pulls a manifest without it). A shell that already exported `VAR` keeps it — no later `mien use` or `mien-unset` clears it, and `mien status`, which reads the same custom half of the list, stops reporting it as set. Run `mien-unset` in that shell *before* the name leaves the config, or `unset VAR` by hand afterwards; a shell that never inherited the variable is unaffected.
 
 ## Files
 

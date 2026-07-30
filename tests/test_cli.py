@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from mien.backends.base import SecretNotFound
 from mien.cli import main
+from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN
 
 
 @pytest.fixture
@@ -69,7 +71,7 @@ def _rich_profile_cfg(tmp_path, monkeypatch):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(
             name="work",
             google=GoogleService(email="me@acme.example", oauth_client_id="c",
@@ -108,7 +110,7 @@ def test_whoami_card_omits_absent_providers(runner, tmp_path, monkeypatch):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"solo": Profile(
             name="solo",
             github=GitHubService(username="octocat", host="github.com", token_ref="r"))},
@@ -138,7 +140,7 @@ def _project_env(tmp_path, monkeypatch, *profiles):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={p: Profile(name=p) for p in profiles},
     ))
     ws = tmp_path / "ws"
@@ -284,7 +286,7 @@ def test_whoami_live_cleans_ephemeral_credential_files(runner, tmp_path, monkeyp
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="octocat", host="github.com", token_ref="ref://gh"),
@@ -312,7 +314,7 @@ def test_whoami_live_names_google_when_it_cannot_be_probed(runner, mien_cfg, moc
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="octocat", host="github.com", token_ref="ref://gh"),
@@ -333,6 +335,54 @@ def test_whoami_live_names_google_when_it_cannot_be_probed(runner, mien_cfg, moc
     assert "google" in result.output.lower()
 
 
+def _save_one_profile(prof) -> None:
+    from mien.config import (BackendConfig, Config, SecretNaming, save_config)
+    save_config(Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT,
+                                                slack_token=BUILTIN_SLACK_TOKEN),
+        profiles={prof.name: prof},
+    ))
+
+
+@pytest.mark.parametrize("profile_kwargs, id_", [
+    # A gcloud-login-only google: google IS configured, and the refresh-token
+    # probe still cannot touch it. The message must therefore not claim google is
+    # a supported provider, which is how it read before — a contradiction on the
+    # one profile that hits this raise.
+    (dict(google=dict(email="me@example.com", oauth_client_id="cid",
+                      oauth_client_secret_ref=None, refresh_token_ref=None,
+                      adc_ref=None, gcloud_config_name="personal",
+                      default_project=None)), "gcloud-only-google"),
+    # A custom-only profile: mien is told a variable name, never what the
+    # credential is for, so no probe exists at all.
+    (dict(custom={"NPM_TOKEN": "ref://npm"}), "custom-only"),
+])
+def test_whoami_live_says_it_could_not_check_when_nothing_is_probeable(
+        runner, mien_cfg, mocker, profile_kwargs, id_):
+    """No probeable provider fails closed — but as "could not check", not as a
+    wrong identity, and naming what a probe actually needs."""
+    from mien.config import GoogleService, Profile
+    kwargs = dict(profile_kwargs)
+    if "google" in kwargs:
+        kwargs["google"] = GoogleService(**kwargs["google"])
+    _save_one_profile(Profile(name="personal", **kwargs))
+    mocker.patch("mien.cli.load_backend")
+    mocker.patch("mien.cli.build_env").return_value.env = {}
+
+    result = runner.invoke(main, ["whoami", "personal", "--live"])
+    assert result.exit_code != 0
+    assert "no provider `--live` can probe" in result.output
+    assert "a google with a stored refresh token" in result.output
+    assert "mien login --service google" in result.output
+    assert "could not check" in result.output
+    # And it must not read as a verdict on the identity...
+    assert "not a wrong identity" in result.output
+    # ...nor print a report that looks like one.
+    assert "live identity check" not in result.output
+
+
 def test_whoami_live_names_unchecked_services(runner, mien_cfg, mocker):
     """A profile with slack/notion must not read as fully verified when only
     github was probed."""
@@ -342,7 +392,7 @@ def test_whoami_live_names_unchecked_services(runner, mien_cfg, mocker):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="octocat", host="github.com", token_ref="ref://gh"),
@@ -477,7 +527,7 @@ def _use_setup(runner, mocker, tmp_path, monkeypatch, *, slack=True):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             github=GitHubService(username="me", host="github.com", token_ref="ref://gh"),
@@ -1130,8 +1180,8 @@ def _manifest_cfg():
         schema_version=1,
         secrets_backend=BackendConfig(type="gcp_secret_manager", options={"project": "p1"}),
         bootstrap={"gcp_account": "me@x.com"},
-        secret_naming=SecretNaming(default="mien-{profile}-{service}-{kind}",
-                                   slack_token="mien-{profile}-slack-{workspace}-token"),
+        secret_naming=SecretNaming(default=BUILTIN_DEFAULT,
+                                   slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work",
                                   github=GitHubService(username="u", host="github.com",
                                                        token_ref="ref://x"))},
@@ -1367,7 +1417,7 @@ def _config_with_retired_backend() -> None:
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="oci_vault", options={"vault_id": "v1"}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(
             name="work",
             github=GitHubService(username="octocat", host="github.com", token_ref="r"))},
@@ -1754,7 +1804,7 @@ def _pinned_config(tmp_path, monkeypatch, **scopes):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={n: Profile(name=n, default_for=list(g)) for n, g in scopes.items()},
     ))
 
@@ -2059,7 +2109,7 @@ def test_run_removes_ephemeral_files_after_child_exits(runner, tmp_path, monkeyp
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(
             name="work",
             default_for=["*/Projects/acme"],
@@ -2106,7 +2156,7 @@ def test_env_sync_writes_ambient_and_wires_zshenv(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     save_config(Config(schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", project_env=[
             ProjectEnvScope(match="*/work", env={"AWS_PROFILE": "work"})])}))
     res = CliRunner().invoke(main, ["env", "sync"])
@@ -2126,7 +2176,7 @@ def _env_sync_with_scope(monkeypatch, tmp_path, scope):
     monkeypatch.setenv("HOME", str(tmp_path))
     save_config(Config(schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", project_env=[
             ProjectEnvScope(match=scope, env={"AWS_PROFILE": "work"})])}))
     return CliRunner().invoke(main, ["env", "sync"])
@@ -2163,3 +2213,496 @@ def test_env_sync_is_silent_for_scopes_that_survive_zshenv(monkeypatch, tmp_path
     assert "warning" not in res.stderr and "~/.zshrc" not in res.stderr
     ambient = (tmp_path / "config.json").parent / "ambient.zsh"
     assert f'case "$PWD/" in {scope}/*)' in ambient.read_text()
+
+
+def _custom_cfg(tmp_path, monkeypatch, **customs):
+    """A config whose profiles carry `custom` maps: {profile: {VAR: ref}}."""
+    from mien.config import (BackendConfig, Config, Profile, SecretNaming,
+                             save_config)
+    monkeypatch.setenv("MIEN_CONFIG", str(tmp_path / "c.json"))
+    save_config(Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={},
+        secret_naming=SecretNaming(default=BUILTIN_DEFAULT,
+                                   slack_token=BUILTIN_SLACK_TOKEN),
+        profiles={name: Profile(name=name, custom=dict(custom))
+                  for name, custom in customs.items()},
+    ))
+
+
+def test_login_custom_stores_a_ref_and_never_the_secret(runner, mien_cfg, mocker):
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://anthropic"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main,
+        ["login", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY",
+         "--token-stdin"],
+        input="y\nsk-ant-super-secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "stored ANTHROPIC_API_KEY for work" in result.output
+    # The secret goes to the backend under the `default` template, with the
+    # variable name verbatim as the kind.
+    name, payload = backend.put.call_args[0]
+    assert name == "mien-work-custom-ANTHROPIC_API_KEY"
+    assert payload == b"sk-ant-super-secret"
+    # Only the reference lands in the config — this is the whole difference from
+    # `project_env`, whose values are stored verbatim.
+    raw = mien_cfg.read_text()
+    assert "sk-ant-super-secret" not in raw
+    assert json.loads(raw)["profiles"]["work"]["custom"] == {
+        "ANTHROPIC_API_KEY": "ref://anthropic"}
+
+
+def test_the_manifest_carries_the_custom_name_but_not_its_secret(runner, mien_cfg, mocker):
+    """`mien push` uploads config.json, so a secret in it would be uploaded too.
+
+    The real `push_manifest` runs here — mocking it would prove nothing about
+    what it sends.
+    """
+    from mien.manifest import MANIFEST_SECRET_NAME
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://anthropic"
+    mocker.patch("mien.cli.pull_manifest", return_value=None)
+    runner.invoke(main, ["init", "--backend", "gcp_secret_manager",
+                         "--project", "p1", "--bootstrap-email", "me@x.com"])
+    result = runner.invoke(
+        main,
+        ["login", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY",
+         "--token-stdin"],
+        input="y\nsk-ant-super-secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    manifests = [c.args[1] for c in backend.put.call_args_list
+                 if c.args[0] == MANIFEST_SECRET_NAME]
+    assert manifests, backend.put.call_args_list
+    body = manifests[-1].decode("utf-8")
+    assert "sk-ant-super-secret" not in body
+    assert "ANTHROPIC_API_KEY" in body and "ref://anthropic" in body
+
+
+def test_login_custom_requires_a_name(runner, mien_cfg, mocker):
+    mocker.patch("mien.cli.load_backend")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(main, ["login", "work", "--service", "custom"], input="y\n")
+    assert result.exit_code != 0
+    assert "--name is required for --service custom" in result.output
+
+
+@pytest.mark.parametrize("service", ["github", "notion", "slack"])
+def test_login_name_on_another_service_is_an_error_not_a_silent_ignore(
+    runner, mien_cfg, mocker, service
+):
+    """Ignoring it is how someone believes they stored a key and overwrote a token."""
+    mocker.patch("mien.cli.load_backend")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main, ["login", "work", "--service", service, "--name", "ANTHROPIC_API_KEY"],
+        input="y\n",
+    )
+    assert result.exit_code != 0
+    assert "--name is only meaningful with --service custom" in result.output
+    assert f"--service {service} has no such name" in result.output
+
+
+@pytest.mark.parametrize("name, expect", [
+    ("2FA", "is not a usable environment variable name"),
+    ("MY VAR", "is not a usable environment variable name"),
+    ("api-key", "is not a usable environment variable name"),
+    ("GH_TOKEN", "already uses for github"),
+    ("AWS_PROFILE", "already uses for aws"),
+    ("MIEN_PROFILE", "already uses for mien itself"),
+    # Not mien's, but the shell's — and the scrub is the union over all profiles,
+    # so accepting one of these makes every `mien use` anywhere strip it.
+    ("PATH", "how the shell — and mien's own loader — finds every program it runs"),
+    ("HOME", "where the shell, mien and every other tool look for files"),
+    ("TMPDIR", "where mien writes the ephemeral files that carry your credentials"),
+    # Not read as an instruction but as a safety signal, and mien reads its
+    # absence as "no agent is watching": accepting one of these makes every
+    # `mien use` anywhere emit `unset CLAUDECODE`, disarming the refusals in
+    # `mien token` and `mien exec` with nothing to show that it happened.
+    ("CLAUDECODE", "mien reads it to decide whether an agent is driving"),
+    ("MIEN_CAPTURED", "the marker you set yourself to tell mien this harness records"),
+])
+def test_login_custom_refuses_an_unusable_name_before_reading_a_secret(
+    runner, mien_cfg, mocker, name, expect
+):
+    """Refused at the flag, and refused before anything is stored or prompted."""
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main, ["login", "work", "--service", "custom", "--name", name,
+               "--token-stdin"],
+        input="y\nsk-ant-super-secret\n",
+    )
+    assert result.exit_code != 0
+    assert expect in result.output
+    backend.put.assert_not_called()
+    # And the flag error blames the flag, not the config it never read.
+    assert "The config is at" not in result.output
+
+
+@pytest.mark.parametrize("name", ["MY_PATH", "PATH_TO_KEY", "HOMEBREW_TOKEN",
+                                  "MY_CLAUDECODE", "CLAUDECODE_EXTRA"])
+def test_login_custom_accepts_a_name_that_merely_contains_a_critical_one(
+    runner, mien_cfg, mocker, name
+):
+    """The shell-critical and capture-marker rules are exact match, not substring.
+
+    A substring test would refuse ordinary credentials — `PATH_TO_KEY` is a name
+    someone reasonably picks — while protecting nothing extra: the loader emits
+    `unset PATH_TO_KEY`, which touches no variable the shell reads, and `unset
+    MY_CLAUDECODE` clears no marker `capture_context` ever looks at.
+    """
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://custom"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main, ["login", "work", "--service", "custom", "--name", name,
+               "--token-stdin"],
+        input="y\nsk-secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(mien_cfg.read_text())["profiles"]["work"]["custom"] == {
+        name: "ref://custom"}
+
+
+def test_login_custom_composes_several_variables_on_one_profile(runner, mien_cfg, mocker):
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.side_effect = ["ref://anthropic", "ref://npm"]
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    runner.invoke(main, ["login", "work", "--service", "custom", "--name",
+                         "ANTHROPIC_API_KEY", "--token-stdin"], input="y\nsk-a\n")
+    result = runner.invoke(main, ["login", "work", "--service", "custom", "--name",
+                                  "NPM_TOKEN", "--token-stdin"], input="npm-t\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(mien_cfg.read_text())["profiles"]["work"]["custom"] == {
+        "ANTHROPIC_API_KEY": "ref://anthropic", "NPM_TOKEN": "ref://npm"}
+
+
+def test_login_custom_gives_two_names_differing_only_in_case_two_secrets(
+    runner, mien_cfg, mocker
+):
+    """`TOKEN` and `token` are two shell variables, so they are two stored secrets.
+
+    Case-folding the rendered kind made one backend name for both: the second
+    login overwrote the first login's secret (`put` is a plain overwrite) and the
+    config kept two variables pointing at the survivor — one credential silently
+    destroyed, and a dangling reference the moment either was logged out.
+    """
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.side_effect = lambda name, value: f"ref://{name}"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    runner.invoke(main, ["login", "work", "--service", "custom", "--name",
+                         "TOKEN", "--token-stdin"], input="y\nupper-secret\n")
+    result = runner.invoke(main, ["login", "work", "--service", "custom", "--name",
+                                  "token", "--token-stdin"], input="lower-secret\n")
+    assert result.exit_code == 0, result.output
+    stored = {c.args[0]: c.args[1] for c in backend.put.call_args_list}
+    assert stored == {"mien-work-custom-TOKEN": b"upper-secret",
+                      "mien-work-custom-token": b"lower-secret"}
+    custom = json.loads(mien_cfg.read_text())["profiles"]["work"]["custom"]
+    assert custom == {"TOKEN": "ref://mien-work-custom-TOKEN",
+                      "token": "ref://mien-work-custom-token"}
+    # The point of the two asserts above, said once more as the property: no two
+    # variables may share a reference, or `logout` of one guts the other.
+    assert len(set(custom.values())) == 2
+
+
+@pytest.mark.parametrize("template", [
+    # `{kind}` dropped outright.
+    "mien-{profile}-{service}",
+    # `{kind}` spent through a truncating format spec, which renders
+    # `mien-work-custom-A` for ANTHROPIC_API_KEY and for AWS_THING alike. This is
+    # the same destruction by another spelling, and it used to pass the check: the
+    # token was "present", so both logins exited 0 and the second secret replaced
+    # the first. The rule is structural now, so the spec cannot buy its way in.
+    "mien-{profile}-{service}-{kind:.1s}",
+    # The degenerate spec, byte-identical in effect to the first case.
+    "mien-{profile}-{service}-{kind:.0s}",
+])
+def test_two_custom_logins_cannot_both_succeed_under_a_collapsing_template(
+    runner, mien_cfg, mocker, template
+):
+    """The same silent overwrite, reached through `secret_naming` instead of case.
+
+    `secret_naming.default` is hand-editable and a pulled manifest can carry it,
+    and `{kind}` is the *only* thing that keeps one custom variable's secret apart
+    from the next. With it dropped, both logins used to exit 0, both refs pointed
+    at one secret, `mien exec` handed the same value out under both variable names,
+    and `mien logout` of either left the other dangling — a profile that cannot be
+    activated at all.
+
+    Nothing is stored now: the config that says so cannot be loaded, so the first
+    login already fails, before a secret is read or written.
+    """
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.side_effect = lambda name, value: f"ref://{name}"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    payload = json.loads(mien_cfg.read_text())
+    payload["secret_naming"]["default"] = template
+    mien_cfg.write_text(json.dumps(payload))
+    for name in ("ANTHROPIC_API_KEY", "NPM_TOKEN"):
+        result = runner.invoke(
+            main, ["login", "work", "--service", "custom", "--name", name,
+                   "--token-stdin"],
+            input="y\nsecret-for-%s\n" % name,
+        )
+        assert result.exit_code != 0, result.output
+        assert "does not use {kind}" in result.output
+    backend.put.assert_not_called()
+    # And the config is untouched: nothing claims to have stored anything.
+    assert json.loads(mien_cfg.read_text())["profiles"] == {}
+
+
+@pytest.mark.parametrize("template", [
+    # A token `slack_token` is never rendered with — the one that belongs to the
+    # other template.
+    "mien-{profile}-slack-{workspace}-{kind}",
+    # A positional field, which no check over field names can judge.
+    "mien-{profile}-slack-{workspace}-{}",
+])
+def test_a_bad_slack_token_template_does_not_crash_an_unrelated_login(
+    runner, mien_cfg, mocker, template
+):
+    """The surprising blast radius: `slack_token` breaks a github login.
+
+    `_reject_reserved_secret_name` renders BOTH templates on every `mien login`, to
+    check neither one collides with the config-manifest secret. So a `slack_token`
+    that cannot render took down `--service github`, which has nothing to do with
+    Slack — exit 1, empty stdout, and an uncaught `KeyError` (a traceback in a real
+    terminal) rather than any message naming the template at fault.
+
+    It still fails, and it must: the config names a template mien cannot render, so
+    refusing to load it is the honest answer. What this pins is that the failure is
+    now a legible config error that names `slack_token` and says what to write —
+    not an exception from the middle of a login.
+    """
+    mocker.patch("mien.cli.load_backend")
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    payload = json.loads(mien_cfg.read_text())
+    payload["secret_naming"]["slack_token"] = template
+    mien_cfg.write_text(json.dumps(payload))
+    result = runner.invoke(
+        main, ["login", "work", "--service", "github", "--token-stdin"],
+        input="y\nghp-token\n",
+    )
+    assert result.exit_code != 0
+    # Translated, not propagated: a traceback would leave the raw exception here.
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "KeyError" not in result.output and "Traceback" not in result.output
+    assert "secret_naming: 'slack_token' template" in result.output
+    assert "mien-{profile}-slack-{workspace}-token" in result.output
+
+
+def test_login_custom_accepts_a_secret_cmd_reference(runner, mien_cfg, mocker):
+    """The existing secret-reading path, unchanged — no new way to supply one."""
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://anthropic"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main, ["login", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY",
+               "--secret-cmd", "printf sk-from-vault"],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert backend.put.call_args[0][1] == b"sk-from-vault"
+
+
+def test_logout_custom_deletes_the_secret_and_forgets_the_name(runner, tmp_path, monkeypatch, mocker):
+    _custom_cfg(tmp_path, monkeypatch,
+                work={"ANTHROPIC_API_KEY": "ref://a", "NPM_TOKEN": "ref://n"})
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    result = CliRunner().invoke(
+        main, ["logout", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY"])
+    assert result.exit_code == 0, result.output
+    assert "removed custom variable ANTHROPIC_API_KEY from work" in result.output
+    backend.delete.assert_called_once_with("ref://a")
+    payload = json.loads((tmp_path / "c.json").read_text())
+    assert payload["profiles"]["work"]["custom"] == {"NPM_TOKEN": "ref://n"}
+
+
+def test_logout_custom_requires_a_name(runner, tmp_path, monkeypatch, mocker):
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    mocker.patch("mien.cli.load_backend")
+    result = CliRunner().invoke(main, ["logout", "work", "--service", "custom"])
+    assert result.exit_code != 0
+    assert "--name is required for --service custom" in result.output
+
+
+def test_logout_custom_names_a_variable_the_profile_does_not_have(
+    runner, tmp_path, monkeypatch, mocker
+):
+    """"removed" would be a lie about a credential, so a typo fails instead."""
+    _custom_cfg(tmp_path, monkeypatch, work={"NPM_TOKEN": "ref://n"})
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    result = CliRunner().invoke(
+        main, ["logout", "work", "--service", "custom", "--name", "ANTHROPIC_API_KEY"])
+    assert result.exit_code != 0
+    assert "has no custom variable 'ANTHROPIC_API_KEY'" in result.output
+    assert "it has: NPM_TOKEN" in result.output
+    backend.delete.assert_not_called()
+
+
+def test_use_clears_a_custom_var_the_new_profile_does_not_define(
+    tmp_path, monkeypatch, mocker
+):
+    """The cross-profile leak, end to end through the CLI.
+
+    `work` defines ANTHROPIC_API_KEY and `personal` does not, so switching to
+    `personal` in a shell that activated `work` must clear it — otherwise one
+    identity hands its API key to another, which is the thing mien exists to stop.
+    """
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    _custom_cfg(tmp_path, monkeypatch,
+                work={"ANTHROPIC_API_KEY": "ref://a"}, personal={})
+    mocker.patch("mien.cli.load_backend")
+    result = CliRunner().invoke(main, ["use", "personal"])
+    assert result.exit_code == 0, result.output
+    script = Path(result.output.strip().split("'")[1])
+    scrub = next(ln for ln in script.read_text().splitlines()
+                 if ln.startswith("unset "))
+    assert "ANTHROPIC_API_KEY" in scrub.split()
+
+
+def test_use_exports_a_custom_var_without_printing_it(tmp_path, monkeypatch, mocker):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    mocker.patch("mien.cli.load_backend").return_value.get.return_value = b"sk-secret\n"
+    result = CliRunner().invoke(main, ["use", "work"])
+    assert result.exit_code == 0, result.output
+    assert "sk-secret" not in result.output
+    body = Path(result.output.strip().split("'")[1]).read_text()
+    assert "export ANTHROPIC_API_KEY='sk-secret'" in body
+
+
+def test_use_names_the_variable_when_its_secret_is_gone_instead_of_crashing(
+    tmp_path, monkeypatch, mocker
+):
+    """A reference whose secret was deleted is an error a person can act on.
+
+    Nothing on this path caught `SecretNotFound`, so a secret removed out of band
+    — or one that two references shared before mien stopped folding their names —
+    came out as a traceback with a bare ref in it and a profile that would not
+    activate.
+    """
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://gone"})
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.get.side_effect = SecretNotFound("ref://gone")
+    result = CliRunner().invoke(main, ["use", "work"])
+    assert result.exit_code != 0
+    # Translated, not propagated: a traceback would leave `result.exception` as
+    # the backend error itself.
+    assert not isinstance(result.exception, SecretNotFound)
+    assert "ref://gone" in result.output          # the reference,
+    assert "ANTHROPIC_API_KEY" in result.output   # the variable it delivers,
+    assert "'work'" in result.output              # the profile that is stuck,
+    assert "mien login" in result.output          # and the way out.
+
+
+def test_unset_clears_custom_vars_named_by_any_profile(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch,
+                work={"ANTHROPIC_API_KEY": "ref://a"}, personal={"NPM_TOKEN": "ref://n"})
+    result = CliRunner().invoke(main, ["unset"])
+    assert result.exit_code == 0, result.output
+    assert "unset ANTHROPIC_API_KEY" in result.output
+    assert "unset NPM_TOKEN" in result.output
+    assert "unset MIEN_PROFILE" in result.output
+
+
+def test_unset_on_a_broken_config_clears_the_builtins_and_says_what_it_missed(
+    tmp_path, monkeypatch
+):
+    """Fail open, and never quietly.
+
+    `mien-unset` evals this command's stdout (`clears="$(command mien unset)" ||
+    return $?`), so exiting non-zero would mean nothing at all is cleared — the
+    built-in scrub lost too. It clears what it can and puts the shortfall on
+    stderr, which the wrapper does not capture.
+    """
+    cfg = tmp_path / "c.json"
+    cfg.write_text('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+                   ' "profiles": {"work": {"custm": {}}}}')
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+    result = CliRunner().invoke(main, ["unset"])
+    assert result.exit_code == 0, result.stderr
+    assert "unset MIEN_PROFILE" in result.stdout
+    assert "unset GH_TOKEN" in result.stdout
+    assert "config unreadable" in result.stderr
+    assert "custom variable" in result.stderr and "may still be set" in result.stderr
+    # The announcement must not reach stdout: the wrapper evals that.
+    assert "config unreadable" not in result.stdout
+
+
+def test_status_shows_a_custom_var_as_set_never_its_value(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    monkeypatch.setenv("MIEN_PROFILE", "work")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-super-secret")
+    result = CliRunner().invoke(main, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "ANTHROPIC_API_KEY=<set>" in result.output
+    assert "sk-ant-super-secret" not in result.output
+
+
+def test_status_omits_a_custom_var_that_is_not_set(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    monkeypatch.setenv("MIEN_PROFILE", "work")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = CliRunner().invoke(main, ["status"])
+    assert "ANTHROPIC_API_KEY" not in result.output
+
+
+def test_status_on_a_broken_config_still_reports_and_says_what_it_cannot_name(
+    tmp_path, monkeypatch
+):
+    cfg = tmp_path / "c.json"
+    cfg.write_text('{"$schema_version": 1, "secrets_backend": {"type": "keyring"},'
+                   ' "profiles": {"work": {"custm": {}}}}')
+    monkeypatch.setenv("MIEN_CONFIG", str(cfg))
+    monkeypatch.setenv("MIEN_PROFILE", "work")
+    monkeypatch.setenv("GH_TOKEN", "ghp_x")
+    result = CliRunner().invoke(main, ["status"])
+    assert result.exit_code == 0, result.stderr
+    assert "active: work" in result.stdout
+    assert "GH_TOKEN=<set>" in result.stdout
+    assert "config unreadable" in result.stderr
+
+
+def test_list_and_whoami_show_custom_names_only(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch,
+                work={"ANTHROPIC_API_KEY": "ref://a", "NPM_TOKEN": "ref://n"})
+    runner = CliRunner()
+    listing = runner.invoke(main, ["list"])
+    assert listing.exit_code == 0, listing.output
+    assert "custom:[ANTHROPIC_API_KEY, NPM_TOKEN]" in listing.output
+    assert "ref://a" not in listing.output
+
+    card = runner.invoke(main, ["whoami", "work"])
+    assert card.exit_code == 0, card.output
+    assert "ANTHROPIC_API_KEY, NPM_TOKEN" in card.output
+    assert "ref://a" not in card.output
+
+    as_json = runner.invoke(main, ["whoami", "work", "--json"])
+    assert as_json.exit_code == 0, as_json.output
+    data = json.loads(as_json.output)
+    assert data["custom"] == ["ANTHROPIC_API_KEY", "NPM_TOKEN"]
+    assert "ref://a" not in as_json.output
+
+
+def test_a_profile_with_no_custom_vars_says_nothing_about_them(tmp_path, monkeypatch):
+    _custom_cfg(tmp_path, monkeypatch, work={})
+    runner = CliRunner()
+    assert "custom" not in runner.invoke(main, ["list"]).output
+    assert "custom" not in runner.invoke(main, ["whoami", "work"]).output
+    assert json.loads(runner.invoke(main, ["whoami", "work", "--json"]).output)["custom"] == []
+
+
+def test_token_has_no_custom_service(runner, tmp_path, monkeypatch):
+    """`token` prints a raw secret on stdout; `exec` covers this need instead."""
+    _custom_cfg(tmp_path, monkeypatch, work={"ANTHROPIC_API_KEY": "ref://a"})
+    result = CliRunner().invoke(main, ["token", "custom", "--profile", "work"])
+    assert result.exit_code != 0
+    assert "custom" in result.output  # click's invalid-choice message

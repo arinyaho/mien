@@ -1,19 +1,19 @@
 ---
 name: mien
-description: Use when the user wants to act as a specific identity/profile across Google (Gmail/Calendar/Drive/GCP), GitHub, Slack, Atlassian, Notion, AWS, or OCI — e.g., "as my work account", "switch to <name>", "post in <workspace>", "send mail from <email>". Activates per-shell credentials for `gh`, `gcloud`, `bq`, `aws`, `oci`, and `curl` calls without polluting other agent sessions.
+description: Use when the user wants to act as a specific identity/profile across Google (Gmail/Calendar/Drive/GCP), GitHub, Slack, Atlassian, Notion, AWS, or OCI — e.g., "as my work account", "switch to <name>", "post in <workspace>", "send mail from <email>". Also covers a credential of the user's own kept per identity — an LLM API key, an npm/PyPI token, a database URL — delivered as an environment variable ("my work Anthropic key", "the npm token for this profile"). Activates per-shell credentials for `gh`, `gcloud`, `bq`, `aws`, `oci`, and `curl` calls without polluting other agent sessions.
 version: 0.6.0
 author: arinyaho
 license: MIT
 compatibility: works best with `mien` on PATH; falls back to source if available
 metadata:
   hermes:
-    tags: [identity, credentials, multi-account, gcp, github, slack, atlassian, notion, aws, oci]
+    tags: [identity, credentials, multi-account, gcp, github, slack, atlassian, notion, aws, oci, api-keys]
     related_skills: []
 ---
 
 # mien — Multi-identity credential router
 
-The user maintains multiple identities, each bundling a Google account (Gmail/Calendar/Drive + GCP) and optionally a GitHub account, one or more Slack workspaces, an Atlassian account (Jira/Confluence), a Notion integration token, AWS credentials, and/or an OCI profile. Use `mien` to activate the right identity in this shell session.
+The user maintains multiple identities, each bundling a Google account (Gmail/Calendar/Drive + GCP) and optionally a GitHub account, one or more Slack workspaces, an Atlassian account (Jira/Confluence), a Notion integration token, AWS credentials, an OCI profile, and/or any credential of their own stored per identity (`custom`: one environment variable name, one secret — an LLM API key, an npm token, a database URL). Use `mien` to activate the right identity in this shell session.
 
 ## When to use
 
@@ -25,6 +25,7 @@ Trigger any time:
 - The user wants to call the Notion API under a specific identity.
 - The user wants to run AWS CLI / SDK calls under a specific identity.
 - The user wants to run OCI CLI calls under a specific identity.
+- The user needs a credential that is not one of the built-in services — an LLM API key, an npm/PyPI token, a database URL — under a specific identity. That is `--service custom` (below): check `mien whoami <profile>` or `mien list` for a `custom` line naming it.
 
 If the user has not configured `mien`, **don't just punt** — drive the conversational setup flow described in `references/setup-flow.md`. Detect state with `mien doctor` (or `mien list` if doctor fails), then guide the user step by step.
 
@@ -146,13 +147,9 @@ credential — so it gates the action when chained before it:
 $MIEN whoami --live work-foo && $MIEN exec work-foo -- gh pr merge 123
 ```
 
-Its exit code is the gate; a wrong live identity or a revoked token stops the `&&`. Caveats
-worth knowing: a provider that could not be reached is reported but does not fail the check
-(could-not-check is not the same as wrong); AWS is reported, not verified, since a profile
-name is not an ARN there is nothing to compare; and slack/atlassian/notion/oci are not
-probed yet, so `--live` names them as unchecked rather than pretending it verified them. For
-a single service you can also inline the comparison, since a bare `gh api user` succeeds
-under *any* valid token and exit status alone gates nothing:
+Its exit code is the gate; a wrong live identity or a revoked token stops the `&&`. Caveats worth knowing: a provider that could not be reached is reported but does not fail the check (could-not-check is not the same as wrong); AWS is reported, not verified, since a profile name is not an ARN there is nothing to compare; and **GitHub, AWS and Google are the only services with a live probe at all** — everything else the profile configures is listed by name under `not checked (no live probe yet)` rather than pretended verified, so read that line instead of assuming a clean report covered the service you care about (`custom` appears there, since mien is told a variable name and never what the credential is for, and so does a gcloud-login-only `google`, which the probe structurally cannot verify — though only when some other provider was probed, since otherwise no report prints at all). **`--live` needs a *probeable* provider to run at all** — github, aws, or a google with a stored refresh token (one logged in via `mien login --service google`, not a gcloud-only login). With none it exits non-zero saying it could not check, and prints no report at all, so a `custom`-only, notion-only or gcloud-login-only-google profile fails the `&&` without having checked anything. That fails closed, so nothing runs as the wrong identity — but read it as "could not check", not "wrong identity", and gate those profiles with the inline comparison below or the service's own check.
+
+For a single service you can also inline the comparison, since a bare `gh api user` succeeds under *any* valid token and exit status alone gates nothing:
 
 ```bash
 [ "$($MIEN run -- gh api user -q .login)" = "expected-login" ] \
@@ -204,6 +201,34 @@ $MIEN exec work-foo -- sh -c 'curl -s -H "Authorization: Bearer $NOTION_TOKEN" \
 
 `NOTION_TOKEN` arrives from `mien exec` (and is exported by `mien use`).
 
+For a credential of the user's own (`custom`):
+
+```bash
+$MIEN whoami work-foo                # the `custom` row lists the variable NAMES this profile carries
+$MIEN exec work-foo -- claude -p "…" # arrives as $ANTHROPIC_API_KEY, like any other variable
+$MIEN exec work-foo -- npm publish   # arrives as $NPM_TOKEN
+$MIEN exec work-foo -- sh -c 'curl -s -H "Authorization: Bearer $ANTHROPIC_API_KEY" …'
+```
+
+A `custom` credential is one environment variable name chosen by the user, carrying one secret from the backend — nothing else about it is special: it arrives through `exec`/`run`/`use` exactly like `NOTION_TOKEN` does, and the value must be expanded in the *child* shell, never in yours. There is deliberately **no `mien token custom`**; `exec` is the whole interface. `mien status` shows such a variable as `<set>`, and `mien list` / `mien whoami --json` show names only, so nothing you can read prints the value.
+
+**Never run the `login` yourself** (see *Important rules*) — the secret would land in the transcript. Give the user the command to run in their own terminal, or a reference form:
+
+```bash
+mien login  <profile> --service custom --name ANTHROPIC_API_KEY                  # hidden prompt (user runs this)
+mien login  <profile> --service custom --name NPM_TOKEN --secret-cmd 'op read op://Private/npm/token'
+mien logout <profile> --service custom --name ANTHROPIC_API_KEY                   # deletes the secret
+```
+
+`--name` is the environment variable name. It is required with `--service custom` and refused with any other service. mien refuses a name **four** ways — at `login` time and again every time the config is parsed, so a hand-edited config fails exactly as the CLI would have, and each error says what the name already means:
+
+- it is not a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`, ASCII only);
+- it is a variable mien already exports itself — either for a built-in service (`GH_TOKEN`, `AWS_PROFILE`, `NOTION_TOKEN`, …), where the error names the service it would fight so you can use that built-in's own `--service` instead, or for mien's own bookkeeping (`MIEN_PROFILE`, `MIEN_EPHEMERAL_DIR`), where the only remedy is another name;
+- it is one the shell or mien itself reads as an instruction: `PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG`;
+- it is one of the agent-harness capture markers mien reads to know an agent is driving: `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `MIEN_CAPTURED`.
+
+The last two exist because `mien use` and `mien-unset` `unset` every managed name in *every* shell, and that list is the union over all profiles: such a name in one profile would break shells that have nothing to do with it, or — for a marker, whose absence mien reads as "no agent is watching" — silently disarm the `mien token` and `mien exec` refusals described above. Matching is exact and case-sensitive throughout (`MY_PATH` is an ordinary name); `references/schema.md` carries the full list and the reason for each. Only a backend *reference* is written to the config, so the secret is not in `config.json` and not in the pushed manifest.
+
 For AWS:
 
 ```bash
@@ -229,7 +254,7 @@ $MIEN exec work-foo -- oci iam user get --user-id <ocid>   # uses OCI_CLI_PROFIL
 - **In a persistent human shell, pass an owner pid** — use the `mien-use` wrapper (it passes `$$`), or `eval "$(mien use --owner-pid $$ <profile>)"`. Without it the ephemeral files are keyed to mien's already-exited process, and a stray `mien doctor --gc` then deletes credentials the shell is still using. This does **not** apply to the single-call agent form above: that shell is short-lived and dies with the invocation, so keying the files to it or to mien amounts to the same thing, and they are meant to be reclaimed.
 - **Never run `mien login` yourself to enter a secret.** The agent's shell is non-interactive, so you would have to put the secret in the command — which lands in the session transcript and shell history. Instead:
   - Tell the user to run the `mien login <profile> --service ...` command **themselves** in their own terminal (the hidden `getpass` prompt keeps it out of argv/history), **or**
-  - Use a credential reference, not the value: `mien login <profile> --service <svc> --secret-cmd 'op read op://Vault/item/field'` (also works with `gcloud secrets versions access`, `security find-generic-password`, etc.). The `op://…` reference is safe to appear in history; the secret never does.
+  - Use a credential reference, not the value: `mien login <profile> --service <svc> --secret-cmd 'op read op://Vault/item/field'` (also works with `gcloud secrets versions access`, `security find-generic-password`, etc.). The `op://…` reference is safe to appear in history; the secret never does. This is the form to prefer for `--service custom --name <VAR>` too.
   - For Google, a pre-existing refresh token can be piped: `… --refresh-token-stdin < tokenfile` with the client secret via `--secret-cmd`.
 - **Don't switch the active profile in this shell** if the user is asking for a one-off in another identity — use `mien exec <other> -- <cmd>` so the parent shell stays clean.
 - **A refused `exec` is not a broken command.** Under an agent harness, `mien exec <p> -- …` refuses when this place visibly belongs to a *different* profile — an approved `.mien` declaration, else the repository's `origin` owner or a `default_for` scope. Nothing runs and no credential is loaded, and the error names the profile that does claim the place: re-run as that profile, or stop and ask the user if you believe the profile you named is the right one. Treat the refusal as the answer — do not go looking for a phrasing that gets past it. It is a mistake-catcher, not a security boundary, so it is not hard to evade; evading it is how you end up acting as the wrong person, which is the whole thing it exists to stop. (A person at a terminal never triggers this check.)

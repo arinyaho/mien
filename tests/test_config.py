@@ -18,6 +18,7 @@ from mien.config import (
     save_config,
     serialize_config,
 )
+from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN
 
 
 def test_config_path_uses_env_override(monkeypatch, tmp_path):
@@ -73,7 +74,7 @@ def test_owns_remotes_survives_a_roundtrip_and_rejects_a_bare_string(monkeypatch
     cfg = Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="x", slack_token="y"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"personal": Profile(
             name="personal",
             owns_remotes=["github.com/me/*", "github.com/me-labs/*"],
@@ -101,7 +102,7 @@ def test_git_identity_fields_survive_a_roundtrip(monkeypatch, tmp_path):
     cfg = Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="x", slack_token="y"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", git_email="me@x.example")},
     )
     save_config(cfg)
@@ -370,7 +371,7 @@ def test_save_creates_parent_dir_and_chmods_600(monkeypatch, tmp_path):
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
         bootstrap={},
-        secret_naming=SecretNaming(default="x", slack_token="y"),
+        secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={},
     )
     save_config(cfg)
@@ -431,7 +432,7 @@ def test_project_env_round_trips():
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
         bootstrap={},
-        secret_naming=SecretNaming(default="d", slack_token="s"),
+        secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", project_env=[
             ProjectEnvScope(match="*/work/arinyaho", env={"AWS_PROFILE": "work", "WORK_ROOT": "$HOME/work/arinyaho"}),
             ProjectEnvScope(match="*/arinyaho-ai*", env={"PYTHONPATH": "$HOME/x/src"}),
@@ -445,14 +446,14 @@ def test_project_env_round_trips():
 
 def test_config_without_project_env_defaults_empty():
     raw = {"$schema_version": 1, "secrets_backend": {"type": "macos_keychain"},
-           "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+           "bootstrap": {}, "secret_naming": {},
            "profiles": {"p": {"github": None}}}
     assert deserialize_config(raw).profiles["p"].project_env == []
 
 
 def _raw_with_default_for(value) -> dict:
     return {"$schema_version": 1, "secrets_backend": {"type": "macos_keychain"},
-            "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+            "bootstrap": {}, "secret_naming": {},
             "profiles": {"work": {"default_for": value}}}
 
 
@@ -848,7 +849,7 @@ def test_both_schema_version_spellings_still_parse(version_key):
     loading.
     """
     raw = {version_key: 1, "secrets_backend": {"type": "keyring"},
-           "bootstrap": {}, "secret_naming": {"default": "d", "slack_token": "s"},
+           "bootstrap": {}, "secret_naming": {},
            "profiles": {"work": {}}}
     cfg = deserialize_config(raw)
     assert cfg.schema_version == 1
@@ -872,12 +873,13 @@ def test_every_top_level_key_mien_writes_is_accepted():
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
         bootstrap={"gcp_account": "me@example.com"},
-        secret_naming=SecretNaming(default="d-{profile}", slack_token="s-{workspace}"),
+        secret_naming=SecretNaming(default="acme.{kind}.{service}.{profile}",
+                                   slack_token="acme.{workspace}.{profile}"),
         profiles={"work": Profile(name="work")},
     )
     back = deserialize_config(serialize_config(cfg))
     assert back.bootstrap == {"gcp_account": "me@example.com"}
-    assert back.secret_naming.default == "d-{profile}"
+    assert back.secret_naming.default == "acme.{kind}.{service}.{profile}"
 
 
 def test_secret_naming_with_only_known_keys_is_accepted():
@@ -992,6 +994,255 @@ def test_a_wrong_typed_secret_naming_template_is_a_configerror():
         assert f"secret_naming: 'default' must be a string, got {found}" in str(exc.value)
 
 
+def _raw_with_naming(**naming) -> dict:
+    return {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+            "bootstrap": {}, "secret_naming": naming, "profiles": {"work": {}}}
+
+
+@pytest.mark.parametrize("template,missing,collapses", [
+    # The concrete report: `{kind}` is the only thing keeping one custom
+    # variable's secret apart from the next, and github's token from its ssh key.
+    ("mien-{profile}-{service}", "{kind}", "every credential of one service"),
+    # Pre-existing exposure of the same kind: atlassian and notion both store a
+    # kind of `api_token`, so without `{service}` they are one secret.
+    ("mien-{profile}-{kind}", "{service}", "every service renders the same name"),
+    # And without `{profile}` every identity shares one, which is the whole point
+    # of mien.
+    ("mien-{service}-{kind}", "{profile}", "every profile renders the same name"),
+    ("mien-secret", "{profile}, {service}, {kind}", "every profile"),
+])
+def test_a_default_template_that_cannot_distinguish_is_refused(
+    template, missing, collapses
+):
+    """A template that drops a token renders one name for two credentials.
+
+    `mien login` then stores the second over the first with nothing said, both
+    config entries point at the survivor, and `mien logout` of either deletes the
+    secret the other still references. Refused at parse time, so a hand-edited
+    config and a manifest pulled from a shared backend are both covered — the
+    manifest goes through this same parser.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default=template))
+    msg = str(exc.value)
+    assert f"secret_naming: 'default' template {template!r}" in msg
+    assert f"does not use {missing}" in msg
+    assert collapses in msg
+    # What breaks, and the way out.
+    assert "overwrites the first with nothing said" in msg
+    assert "mien-{profile}-{service}-{kind}" in msg
+
+
+@pytest.mark.parametrize("template,missing", [
+    # Two workspaces on one profile, one secret: the same collapse, and
+    # `slack_token` is exposed to it because it is rendered with its own tokens.
+    ("mien-{profile}-slack-token", "{workspace}"),
+    ("mien-slack-{workspace}-token", "{profile}"),
+])
+def test_a_slack_token_template_that_cannot_distinguish_is_refused(template, missing):
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(slack_token=template))
+    msg = str(exc.value)
+    assert f"secret_naming: 'slack_token' template {template!r}" in msg
+    assert f"does not use {missing}" in msg
+    assert "mien-{profile}-slack-{workspace}-token" in msg
+    # `slack_token` is never rendered with a `{service}`: the literal "slack" is
+    # the template's own, so requiring it would refuse the built-in template.
+    assert "{service}" not in msg
+
+
+def test_the_builtin_templates_pass_the_check():
+    """The rule may not reject the config mien writes for itself."""
+    from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN
+    cfg = deserialize_config(_raw_with_naming(
+        default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN))
+    assert cfg.secret_naming.default == BUILTIN_DEFAULT
+    # And so does the absent case, which falls back to those same templates.
+    assert deserialize_config(_raw_with_naming()).secret_naming.default == BUILTIN_DEFAULT
+
+
+@pytest.mark.parametrize("default,slack_token", [
+    # Renamed prefix, the arrangement mien's own docs show.
+    ("acme-{profile}-{service}-{kind}", "acme-{profile}-slack-{workspace}-token"),
+    # Reordered, differently separated, and with extra literals: distinguishing
+    # is the only requirement, not any particular shape.
+    ("{kind}.{service}.{profile}.acme", "{workspace}--{profile}--slack"),
+    # A token may also appear more than once.
+    ("{profile}/{service}/{kind}/{profile}", "{profile}-{workspace}-{workspace}"),
+])
+def test_a_custom_template_that_does_distinguish_still_passes(default, slack_token):
+    cfg = deserialize_config(_raw_with_naming(default=default, slack_token=slack_token))
+    assert cfg.secret_naming.default == default
+    assert cfg.secret_naming.slack_token == slack_token
+
+
+@pytest.mark.parametrize("template", [
+    # `{{kind}}` is an escaped literal: it renders the six characters `{kind}`
+    # for every credential and substitutes nothing, so a substring search for
+    # "{kind}" would wave through a template that collapses everything.
+    "mien-{profile}-{service}-{{kind}}",
+    # A field that only reaches INTO the token does not reproduce it: two kinds
+    # sharing a first character still land on one name.
+    "mien-{profile}-{service}-{kind[0]}",
+])
+def test_a_token_that_looks_present_but_substitutes_nothing_is_refused(template):
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default=template))
+    assert "does not use {kind}" in str(exc.value)
+
+
+# The two rules the template check enforces are different mistakes with different
+# fixes, so each error has to say WHICH one was made. These are the phrases the
+# tests below key on; a message may carry one of them, never both.
+_COLLAPSE = "as a plain replacement field"          # rule 1, token not spent
+_DECORATED = "through a format spec, a conversion"  # rule 1, decoration refused
+_UNRENDERABLE = "asks for a field mien does not substitute into it"  # rule 2
+
+
+@pytest.mark.parametrize("template,missing,field", [
+    # The report: a truncating spec. `{kind:.1s}` keeps one character, so
+    # ANTHROPIC_API_KEY and AWS_THING both render `mien-work-custom-A` — the same
+    # collapse as dropping `{kind}`, which the presence-only rule accepted while
+    # refusing the equivalent `{kind[0]}`.
+    ("mien-{profile}-{service}-{kind:.1s}", "{kind}", "{kind:.1s}"),
+    # And the degenerate one: `.0s` keeps nothing, so the rendered name is
+    # byte-identical to the template with `{kind}` deleted.
+    ("mien-{profile}-{service}-{kind:.0s}", "{kind}", "{kind:.0s}"),
+    # A conversion is not a substitution either: `!r` renders `'token'`, quotes
+    # and all, into a backend secret name.
+    ("mien-{profile}-{service}-{kind!r}", "{kind}", "{kind!r}"),
+    # An unknown conversion never even renders; it is refused for the same
+    # structural reason, before anything tries.
+    ("mien-{profile}-{service}-{kind!x}", "{kind}", "{kind!x}"),
+    # Not only `{kind}`: truncate the profile and `work` and `web` share every
+    # secret, which is the whole of what mien is for.
+    ("mien-{profile:.1}-{service}-{kind}", "{profile}", "{profile:.1}"),
+    # A nested spec hides a second field inside the first. The spec is what makes
+    # this rule 1: `{kind}` is not reproduced whatever `{w}` turns out to be.
+    ("mien-{profile}-{service}-{kind:{w}}", "{kind}", "{kind:{w}}"),
+])
+def test_a_token_spent_through_a_spec_or_conversion_does_not_count(
+    template, missing, field
+):
+    """Rule 1 is structural: a required token must appear as a bare `{name}`.
+
+    A probe render cannot establish this. `{kind:.0s}` renders fine — it renders
+    the SAME name for every credential, which is the failure — so "it rendered"
+    says nothing about whether two credentials stay apart. Only the shape of the
+    field does: a plain field reproduces its token verbatim and is therefore
+    injective in it by construction, while a spec, a conversion, an attribute or
+    an index all compute something shorter or different.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default=template))
+    msg = str(exc.value)
+    assert f"does not use {missing} {_COLLAPSE}" in msg
+    # Named the offending field, and said why a decoration is not a substitution.
+    assert field in msg
+    assert "does not count as spending the token" in msg
+    # What breaks, and the way out.
+    assert "overwrites the first with nothing said" in msg
+    assert "has to appear in it as a bare `{name}`" in msg
+    assert "mien-{profile}-{service}-{kind}" in msg
+    # This is rule 1, not rule 2, and the message must not blur the two.
+    assert _UNRENDERABLE not in msg
+
+
+def test_a_decorated_field_is_refused_even_beside_a_plain_one():
+    """Every field must be plain, not just one field per required token.
+
+    `{profile}` is already spent plainly here, so nothing collapses and rule 2's
+    probe would have to render `{w}` — but a spec has no legitimate use in a
+    secret name (the tokens are already strings: `:s` is a no-op, a width pads
+    with spaces, a precision truncates), so it is refused outright. That is what
+    makes "literal text plus plain fields" the exact shape of an accepted
+    template, with no third category to reason about later.
+    """
+    template = "mien-{profile}-{service}-{kind}-{profile:{w}}"
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default=template))
+    msg = str(exc.value)
+    assert _DECORATED in msg
+    assert "{profile:{w}}" in msg
+    assert "`:s` is a no-op" in msg
+    # Rule 1 again — a different mistake from rule 2, and said differently.
+    assert _UNRENDERABLE not in msg
+    assert _COLLAPSE not in msg
+
+
+@pytest.mark.parametrize("key,template,detail", [
+    # An extra token in `default`: `{workspace}` is the OTHER template's, and
+    # `default` is never rendered with it. Parsed clean before; then `mien login`
+    # died with `KeyError: missing token {workspace} in template`.
+    ("default", "mien-{profile}-{service}-{kind}-{workspace}",
+     "missing token {workspace} in template"),
+    # The mirror: `slack_token` is rendered with `{profile}` and `{workspace}`
+    # only, so `{kind}` there has nothing to stand for either.
+    ("slack_token", "mien-{profile}-slack-{workspace}-{kind}",
+     "missing token {kind} in template"),
+    # Positional fields pass any check made on field NAMES — the name is `""` or
+    # `"0"` — and raise from `format_map` instead.
+    ("default", "mien-{profile}-{service}-{kind}-{}",
+     "Format string contains positional fields"),
+    ("default", "mien-{profile}-{service}-{kind}-{0}",
+     "Format string contains positional fields"),
+])
+def test_a_field_mien_does_not_supply_is_refused_at_parse_time(key, template, detail):
+    """Rule 2 is the other direction: present ⊆ supplied, checked by rendering.
+
+    A set difference over the parser's top-level field names does not cover this:
+    `{}` and `{0}` are names a difference cannot judge, and a token buried in a
+    nested spec is not in the top-level walk at all. Rendering once with exactly
+    the tokens mien supplies decides all of them, and — the point — turns the
+    escape into a `ConfigError` at parse time, where the fail-open surfaces
+    recognize it as a config failure, instead of a bare exception out of whichever
+    command first rendered a name.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(**{key: template}))
+    msg = str(exc.value)
+    assert f"secret_naming: {key!r} template {template!r}" in msg
+    assert _UNRENDERABLE in msg
+    # Quotes the underlying failure, so the offending field is identifiable.
+    assert detail in msg
+    # And says what it may use instead.
+    assert ("{profile}, {service}, {kind}" if key == "default"
+            else "{profile}, {workspace}") in msg
+    # This is rule 2, not rule 1: nothing collapsed, the template cannot render.
+    assert _COLLAPSE not in msg
+    assert _DECORATED not in msg
+
+
+def test_literal_braces_and_repeated_plain_fields_are_still_accepted():
+    """The rules bite on decorations and unknown fields, not on ordinary templates.
+
+    `{{...}}` is escaped literal text, not a field, and a plain token may appear
+    as often as you like — both were accepted before and must stay accepted, or
+    the fix has narrowed what a user may write for no safety gain.
+    """
+    cfg = deserialize_config(_raw_with_naming(
+        default="mien-{profile}-{service}-{kind}-{{literal}}-{kind}",
+        slack_token="{profile}/{workspace}/{profile}"))
+    assert cfg.secret_naming.default.endswith("-{kind}")
+    assert cfg.secret_naming.slack_token == "{profile}/{workspace}/{profile}"
+
+
+def test_a_malformed_template_is_a_configerror_not_a_bare_valueerror():
+    """An unbalanced brace cannot render at all, and must still be a ConfigError.
+
+    The distinctness check parses the template on load, so a template `str.format`
+    chokes on would otherwise escape `deserialize_config` as a plain ValueError —
+    which the fail-open surfaces (guard, status line, `mien unset`) do not
+    recognize as a config failure, so they would go quiet instead of saying they
+    have stopped working.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_naming(default="mien-{profile}-{service}-{kind"))
+    msg = str(exc.value)
+    assert "is not a usable template" in msg
+    assert "mien-{profile}-{service}-{kind}" in msg
+
+
 def test_null_is_still_accepted_wherever_the_annotation_allows_it():
     """The leaf check must not turn every optional field into a required one.
 
@@ -1046,7 +1297,8 @@ def test_the_serializers_own_output_survives_the_leaf_check():
         schema_version=1,
         secrets_backend=BackendConfig(type="keyring", options={"service_prefix": "mien-"}),
         bootstrap={"gcp_account": "me@x.example"},
-        secret_naming=SecretNaming(default="d-{profile}", slack_token="s-{workspace}"),
+        secret_naming=SecretNaming(default="acme.{kind}.{service}.{profile}",
+                                   slack_token="acme.{workspace}.{profile}"),
         profiles={
             "work": Profile(
                 name="work",
@@ -1092,7 +1344,7 @@ def test_a_serialized_slack_workspace_still_carries_a_null_team_id():
     cfg = Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="gcp_secret_manager", options={"project": "p"}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={"work": Profile(name="work", slack=[
             SlackWorkspace(workspace="team-a", user_token_ref="r"),
             SlackWorkspace(workspace="team-b", user_token_ref="r2"),
@@ -1106,3 +1358,263 @@ def test_a_serialized_slack_workspace_still_carries_a_null_team_id():
     back = deserialize_config(serialize_config(cfg)).profiles["work"].slack
     assert back == cfg.profiles["work"].slack
     assert not hasattr(back[0], "team_id")
+
+
+def _raw_with_custom(value) -> dict:
+    return {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+            "bootstrap": {}, "secret_naming": {},
+            "profiles": {"work": {"custom": value}}}
+
+
+def test_a_config_with_no_custom_block_loads_unchanged():
+    """The field is additive: every config written before it still loads.
+
+    `custom` has a default_factory, so absence is an empty map — not a missing
+    required key, which is what a bare annotation would have made it, and which
+    would have made every existing config unloadable on upgrade.
+    """
+    raw = {"$schema_version": 1, "secrets_backend": {"type": "keyring"},
+           "bootstrap": {}, "secret_naming": {},
+           "profiles": {"p": {"github": None}, "q": {}}}
+    cfg = deserialize_config(raw)
+    assert cfg.profiles["p"].custom == {}
+    assert cfg.profiles["q"].custom == {}
+    # And an explicit null is absence too, like every other optional block.
+    assert deserialize_config(_raw_with_custom(None)).profiles["work"].custom == {}
+    assert deserialize_config(_raw_with_custom({})).profiles["work"].custom == {}
+
+
+def test_custom_round_trips_as_names_pointing_at_refs():
+    cfg = Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
+        profiles={"work": Profile(name="work", custom={
+            "ANTHROPIC_API_KEY": "ref://mien-work-custom-anthropic_api_key",
+            "NPM_TOKEN": "ref://mien-work-custom-npm_token",
+        })},
+    )
+    written = json.loads(serialize_config(cfg))["profiles"]["work"]["custom"]
+    assert written == {
+        "ANTHROPIC_API_KEY": "ref://mien-work-custom-anthropic_api_key",
+        "NPM_TOKEN": "ref://mien-work-custom-npm_token",
+    }
+    assert deserialize_config(serialize_config(cfg)) == cfg
+
+
+def test_an_empty_custom_map_is_not_written_at_all():
+    """The write-side shim for OLDER readers, and the reason it exists.
+
+    A mien predating `custom` rejects an unknown *profile* key hard, and that
+    ConfigError takes the whole config down — not just the profile carrying the
+    key. Since this same JSON is what `mien push` stores as the shared manifest,
+    writing `"custom": {}` on a profile that uses nothing new would cost an older
+    machine every identity it has: `mien sync` fails, and `mien init` swallows it
+    into "(manifest check skipped: ...)", exits 0, and leaves the empty config it
+    just wrote. The printed remedy makes it worse — `mien push` from there
+    uploads a custom-less config and empties the map for everyone.
+
+    Omitting the key cannot save a profile that actually *uses* `custom` (asserted
+    below: the key is written then, because the map is the identity). What it buys
+    is that the break is confined to those profiles instead of being fleet-wide.
+    """
+    cfg = Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
+        profiles={
+            "plain": Profile(name="plain"),
+            "work": Profile(name="work", custom={"NPM_TOKEN": "ref://npm"}),
+        },
+    )
+    written = json.loads(serialize_config(cfg))["profiles"]
+    assert "custom" not in written["plain"]
+    assert written["work"]["custom"] == {"NPM_TOKEN": "ref://npm"}
+    # Absent is empty on the way back in, so the current reader is unaffected:
+    # the omission says exactly what `{}` said.
+    assert deserialize_config(serialize_config(cfg)) == cfg
+
+
+@pytest.mark.parametrize("value, expect", [
+    # A name that is not a shell identifier breaks the loader script `mien use`
+    # writes: sourcing it fails at that line and abandons the rest of the file,
+    # so every later export — the whole rest of the identity — silently vanishes.
+    ({"2FA": "ref://x"},
+     r"profile 'work': custom: '2FA' is not a usable environment variable name"),
+    ({"MY VAR": "ref://x"},
+     r"profile 'work': custom: 'MY VAR' is not a usable environment variable name"),
+    ({"": "ref://x"},
+     r"profile 'work': custom: '' is not a usable environment variable name"),
+    # A collision with a built-in must not be resolved by whichever `build_env`
+    # branch happens to run last.
+    ({"GH_TOKEN": "ref://x"},
+     r"profile 'work': custom: 'GH_TOKEN' is the environment variable mien "
+     r"already uses for github"),
+    ({"AWS_SECRET_ACCESS_KEY": "ref://x"}, r"already uses for aws"),
+    ({"NOTION_TOKEN": "ref://x"}, r"already uses for notion"),
+    ({"MIEN_PROFILE": "ref://x"}, r"already uses for mien itself"),
+    # A name the shell itself reads is worse than a collision: the scrub is the
+    # union over every profile, so this one name makes `mien use <anything>` and
+    # `mien-unset` strip PATH in shells that never touch this profile.
+    ({"PATH": "ref://x"},
+     r"profile 'work': custom: 'PATH' is how the shell — and mien's own loader — "
+     r"finds every program it runs"),
+    ({"PS1": "ref://x"}, r"'PS1' is the prompt the shell renders"),
+    ({"IFS": "ref://x"}, r"'IFS' is how the shell splits every word it parses"),
+    ({"MIEN_CONFIG": "ref://x"}, r"'MIEN_CONFIG' is where mien reads and writes the config"),
+    # A capture marker is worse still, and quieter: the same union-scrub emits
+    # `unset CLAUDECODE` in every shell, which disarms the refusals that keep a
+    # secret out of a recorded transcript — and nothing looks broken afterwards.
+    ({"CLAUDECODE": "ref://x"},
+     r"profile 'work': custom: 'CLAUDECODE' is the marker Claude Code sets to say "
+     r"an agent, not a person, is driving this shell"),
+    ({"MIEN_CAPTURED": "ref://x"},
+     r"'MIEN_CAPTURED' is the marker you set yourself to tell mien this harness "
+     r"records what mien prints"),
+    ({"CLAUDE_CODE_ENTRYPOINT": "ref://x"}, r"agent entrypoint that is driving this shell"),
+    # The value is a REFERENCE, and a non-string one dies in `backend.get` deep
+    # inside `mien use`, long after the config that named it.
+    ({"ANTHROPIC_API_KEY": 5},
+     r"profile 'work': custom: 'ANTHROPIC_API_KEY' must be a backend secret "
+     r"reference string \(not the secret itself\), got int: 5"),
+    ({"ANTHROPIC_API_KEY": None}, r"must be a backend secret reference string"),
+    ({"ANTHROPIC_API_KEY": ["ref://x"]}, r"must be a backend secret reference string"),
+    # Shape, like every other block: checked, never coerced.
+    ([{"ANTHROPIC_API_KEY": "ref://x"}],
+     r"profile 'work': custom must be a JSON object, got list"),
+    ("ANTHROPIC_API_KEY", r"profile 'work': custom must be a JSON object, got str"),
+])
+def test_a_bad_custom_block_is_refused_at_parse_time(value, expect):
+    """A hand-edited config fails exactly as `mien login` would have.
+
+    Both gates exist because either alone leaves the other open: the CLI cannot
+    stop an editor, and the parser cannot stop a name being written in the first
+    place. `ConfigError` specifically, so the fail-open surfaces announce rather
+    than exiting in silence.
+    """
+    with pytest.raises(ConfigError, match=expect):
+        deserialize_config(_raw_with_custom(value))
+
+
+def test_a_custom_collision_message_points_at_the_builtin_login():
+    """The remedy names the command that stores the built-in it would fight."""
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_custom({"ATLASSIAN_API_TOKEN": "ref://x"}))
+    assert "--service atlassian" in str(exc.value)
+
+
+def test_every_builtin_variable_is_refused_as_a_custom_name():
+    """Derived from the same map the scrub is, so a new built-in is covered too."""
+    from mien.shell import BUILTIN_VARS
+    for var in BUILTIN_VARS:
+        with pytest.raises(ConfigError, match="already uses for"):
+            deserialize_config(_raw_with_custom({var: "ref://x"}))
+
+
+def test_every_shell_critical_variable_is_refused_as_a_custom_name():
+    """Derived from the same map, so an entry added later is covered too.
+
+    Each refusal quotes that map's description, which is what keeps a name from
+    being listed without a reason a reader can weigh.
+    """
+    from mien.shell import SHELL_CRITICAL_VARS
+    for var, description in SHELL_CRITICAL_VARS.items():
+        with pytest.raises(ConfigError) as exc:
+            deserialize_config(_raw_with_custom({var: "ref://x"}))
+        assert description in str(exc.value)
+        assert "Pick another name." in str(exc.value)
+
+
+def test_every_capture_marker_is_refused_as_a_custom_name():
+    """Derived from the map the DETECTOR reads, so a marker added later is covered.
+
+    Each refusal quotes that map's description of what sets the marker, which is
+    what keeps a name from being listed without a reason a reader can weigh.
+    """
+    from mien.shell import CAPTURE_MARKER_VARS
+    for var, description in CAPTURE_MARKER_VARS.items():
+        with pytest.raises(ConfigError) as exc:
+            deserialize_config(_raw_with_custom({var: "ref://x"}))
+        assert description in str(exc.value)
+        assert "Pick another name." in str(exc.value)
+
+
+def test_the_capture_marker_refusal_explains_what_clearing_it_would_disarm():
+    """The reason is not "the shell needs it" — no shell does. It is polarity.
+
+    `unset CLAUDECODE` breaks nothing and exporting a credential over it leaves it
+    non-empty, i.e. still detected. The harm is the other direction: mien reads the
+    marker's ABSENCE as "no agent is watching", so the scrub's `unset` turns two
+    refusals off while everything still looks fine. A message that only said "pick
+    another name" would leave a reader with no way to weigh that.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_custom({"CLAUDECODE": "ref://x"}))
+    message = str(exc.value)
+    assert "mien reads it to decide whether an agent is driving" in message
+    assert "ABSENCE as 'no agent'" in message
+    assert "unset CLAUDECODE" in message
+    assert "`mien token`" in message and "`mien exec`" in message
+    assert "silently" in message
+
+
+def test_the_shell_critical_list_does_not_overlap_the_builtins():
+    """Two rules, two disjoint sets — a name in both would get the wrong message."""
+    from mien.shell import BUILTIN_VARS, SHELL_CRITICAL_VARS
+    assert not set(BUILTIN_VARS) & set(SHELL_CRITICAL_VARS)
+
+
+def test_the_three_refused_sets_are_pairwise_disjoint():
+    """Three reasons, three disjoint maps: a name in two would get one message.
+
+    The capture markers are refused for a reason the shell-critical rule does not
+    state (their absence is the permissive state, not a broken shell), so they are
+    held apart rather than folded in — and a marker that drifted into either other
+    map would be explained by the wrong sentence.
+    """
+    from mien.shell import BUILTIN_VARS, CAPTURE_MARKER_VARS, SHELL_CRITICAL_VARS
+    assert not set(CAPTURE_MARKER_VARS) & set(BUILTIN_VARS)
+    assert not set(CAPTURE_MARKER_VARS) & set(SHELL_CRITICAL_VARS)
+
+
+@pytest.mark.parametrize(
+    "name", ["MY_CLAUDECODE", "CLAUDECODE_EXTRA", "MIEN_CAPTURED_AT",
+             "CLAUDE_CODE_ENTRYPOINT_URL"])
+def test_a_name_merely_containing_a_capture_marker_is_accepted(name):
+    """Exact match, not substring — `capture_context` reads exact names too.
+
+    A substring rule would refuse usable credential names while protecting
+    nothing: `unset MY_CLAUDECODE` clears no marker mien ever looks at.
+    """
+    cfg = deserialize_config(_raw_with_custom({name: "ref://x"}))
+    assert cfg.profiles["work"].custom == {name: "ref://x"}
+
+
+@pytest.mark.parametrize("name", ["MY_PATH", "PATH_TO_KEY", "HOMEBREW_TOKEN", "TMPDIR_KEY"])
+def test_a_name_merely_containing_a_shell_critical_one_is_accepted(name):
+    """Exact match, not substring: `PATH_TO_KEY` is an ordinary credential name.
+
+    The loader emitting `unset PATH_TO_KEY` touches nothing the shell reads, so a
+    substring rule would refuse usable names and protect nothing.
+    """
+    cfg = deserialize_config(_raw_with_custom({name: "ref://x"}))
+    assert cfg.profiles["work"].custom == {name: "ref://x"}
+
+
+def test_a_custom_name_is_a_known_profile_key_not_an_unknown_one():
+    """`custom` is accepted at profile level; a typo of it is still fatal."""
+    cfg = deserialize_config(_raw_with_custom({"ANTHROPIC_API_KEY": "ref://x"}))
+    assert cfg.profiles["work"].custom == {"ANTHROPIC_API_KEY": "ref://x"}
+    with pytest.raises(ConfigError, match="unknown key 'custm'"):
+        deserialize_config({"$schema_version": 1,
+                            "secrets_backend": {"type": "keyring"},
+                            "profiles": {"work": {"custm": {"X": "ref://x"}}}})
+
+
+def test_a_collision_with_miens_own_variable_suggests_no_login_command():
+    """There is no `--service mien itself`, so the remedy must not invent one."""
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_custom({"MIEN_EPHEMERAL_DIR": "ref://x"}))
+    assert "already uses for mien itself" in str(exc.value)
+    assert "Pick another name." in str(exc.value)
+    assert "--service" not in str(exc.value)

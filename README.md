@@ -90,6 +90,7 @@ mien init                               # pick a backend
 mien login personal --service github
 mien login personal --service google --email me@x.com --client-id <id>
 mien login personal --service slack --workspace team-a
+mien login personal --service custom --name ANTHROPIC_API_KEY   # a credential of your own
 ```
 
 `mien discover` is the onboarding shortcut: it inventories the AWS/OCI profiles, gcloud configurations, and GitHub accounts already configured locally, and shows which are bound to a mien profile and which are not — with the `mien login` command to import each:
@@ -267,6 +268,34 @@ A single `**/*github.com/acme-inc/**` glob matches `https://` and `ssh://` remot
 ```
 
 mien never writes git's `user.email` (that's git's includeIf above); it reads `git_email` only so the [guard](#refuse-to-act-as-the-wrong-you) and status line can warn when a commit's `user.email` disagrees with the identity acting here — the case git's own rules can't catch.
+
+## Your own credentials
+
+The seven built-in services are not the whole of an identity. An LLM API key, an npm or PyPI token, a database URL — anything that is one env var carrying one secret — goes in the same profile and arrives the same way:
+
+```bash
+mien login work --service custom --name ANTHROPIC_API_KEY          # hidden prompt, nothing in argv or history
+mien login work --service custom --name NPM_TOKEN --secret-cmd 'op read op://Private/npm/token'
+mien exec  work -- claude -p "review this"                          # arrives as $ANTHROPIC_API_KEY
+mien logout work --service custom --name ANTHROPIC_API_KEY          # deletes the secret, forgets the name
+```
+
+The secret goes to your backend under the usual rendered name, with the variable name in it exactly as you wrote it (`mien-work-custom-ANTHROPIC_API_KEY`) — env var names are case-sensitive, so `TOKEN` and `token` are two variables and get two secrets. The profile stores only a **reference** to it:
+
+```jsonc
+"work": {
+  "custom": {
+    "ANTHROPIC_API_KEY": "<backend-ref>",
+    "NPM_TOKEN":         "<backend-ref>"
+  }
+}
+```
+
+That is the difference from `project_env` below, which is for non-secret values only: a `project_env` value is stored verbatim in `config.json` and uploaded verbatim in the backend manifest, while a `custom` value never leaves the backend. `mien status` shows a custom variable as `<set>`; `mien list` and `mien whoami` show the names. There is no `mien token custom` — `token` prints a raw secret on stdout, and `mien exec` is the answer.
+
+Switching profiles clears them. `mien use` unsets every variable mien manages before exporting the new profile's, and that list includes every `custom` name **any** profile defines — so moving from a profile with an `ANTHROPIC_API_KEY` to one without it clears the key instead of handing one identity's credential to another. (`mien exec`/`run` still layer over the ambient environment without scrubbing, as they always have.)
+
+A name has to be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) — `mien use` writes a script that gets sourced, and a name the shell won't take breaks the loader — and it may not be one of the nineteen variables mien already exports itself, whether for a built-in service or for its own bookkeeping (`MIEN_PROFILE`, `MIEN_EPHEMERAL_DIR`). Beyond those, one rule: a variable that the shell or mien *reads as an instruction* cannot be taken over to carry payload, because the scrub list is the union over *all* profiles — one such name in one profile makes every `mien use` and every `mien-unset`, in every shell, `unset` it, so a name in a profile you never activate reaches shells that have nothing to do with it. Two sets fall under that rule. Six are shell- or mien-critical — `PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG` — where stripping or overwriting the value breaks the shell, or mien's own loader, ephemeral store and config. Three are the markers mien reads to know an agent harness is recording this command — `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `MIEN_CAPTURED` — where *absence* is the permissive state, so the scrub's `unset` disarms `mien token`'s refusal to print a secret into a recorded transcript and [`mien exec`'s refusal to act as the wrong identity](#mien-exec-refuses-the-wrong-identity-for-this-place), and disarms them silently. The match is exact, so `MY_PATH` and `PATH_TO_KEY` are fine. All four refusals fire when you log in *and* when the config is parsed, so a hand-edit fails the same way; each error says what the name already means to mien or the shell, and a collision with a service's variable names the service it would have fought so you can reach for that service's own `--service` instead.
 
 ## Ambient per-project env
 

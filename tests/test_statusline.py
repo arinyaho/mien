@@ -8,6 +8,7 @@ from click.testing import CliRunner
 from mien.cli import main
 from mien.config import (BackendConfig, Config, Profile, SecretNaming,
                          save_config)
+from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN
 from mien.statusline import guard_reason, render_segment
 
 
@@ -110,7 +111,7 @@ def _write_cfg(tmp_path, monkeypatch, **profiles):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={name: Profile(name=name, default_for=scopes)
                   for name, scopes in profiles.items()},
     ))
@@ -121,7 +122,7 @@ def _write_cfg_remotes(tmp_path, monkeypatch, **owns):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={name: Profile(name=name, owns_remotes=pats)
                   for name, pats in owns.items()},
     ))
@@ -251,7 +252,7 @@ def _write_cfg_full(tmp_path, monkeypatch, profiles):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles=profiles,
     ))
 
@@ -354,7 +355,7 @@ def _write_cfg_with_a_non_string_backend_type(tmp_path, monkeypatch):
         "$schema_version": 1,
         "secrets_backend": {"type": ["macos_keychain"]},
         "bootstrap": {},
-        "secret_naming": {"default": "d", "slack_token": "s"},
+        "secret_naming": {},
         "profiles": {
             "work": {"owns_remotes": ["github.com/acme-*/*"]},
             "personal": {"owns_remotes": ["github.com/me/*"]},
@@ -682,7 +683,7 @@ def test_statusline_remote_owner_beats_a_directory_scope(tmp_path, monkeypatch):
     save_config(Config(
         schema_version=1,
         secrets_backend=BackendConfig(type="macos_keychain", options={}),
-        bootstrap={}, secret_naming=SecretNaming(default="d", slack_token="s"),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
         profiles={
             "work": Profile(name="work", owns_remotes=["github.com/acme-*/*"]),
             "personal": Profile(name="personal", default_for=["*/flat/*"]),

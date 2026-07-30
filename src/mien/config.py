@@ -265,7 +265,36 @@ def _config_to_dict(cfg: Config) -> dict:
             "oci": asdict(prof.oci) if prof.oci else None,
             "atlassian": asdict(prof.atlassian) if prof.atlassian else None,
             "notion": asdict(prof.notion) if prof.notion else None,
-            "custom": dict(prof.custom),
+            # `custom` is written only when it carries something, and the
+            # omission is deliberate — like the `team_id` null above, it is a
+            # write-side compatibility shim for OLDER readers of this same JSON.
+            #
+            # A mien predating this field rejects unknown *profile* keys hard
+            # ("profile 'plain': unknown key 'custom'"), and that ConfigError
+            # takes the WHOLE manifest down rather than the one profile carrying
+            # the key. Writing `"custom": {}` unconditionally would therefore
+            # cost such a machine every identity it has over a profile that uses
+            # nothing new: `mien sync` fails outright, and `mien init` swallows
+            # it into "(manifest check skipped: ...)", exits 0, and leaves the
+            # empty config it just wrote. Worse, the remedy that failure prints
+            # is `mien push` — which from that machine uploads its own
+            # custom-less config, emptying every profile's `custom` map for
+            # everyone who syncs next.
+            #
+            # Be honest about the shim's reach: it cannot make a profile that
+            # actually uses `custom` readable by a mien that has no such field.
+            # What it buys is that the break stops being fleet-wide the moment
+            # anyone upgrades and becomes confined to the profiles using the
+            # feature.
+            #
+            # Costless for current readers: `Profile.custom` has a
+            # default_factory and the schema documents an absent key as an empty
+            # map, so the key's absence says exactly what `{}` said.
+            #
+            # Drop this once no mien predating `custom` can still read a manifest
+            # written here. As with `team_id`, nothing in the file will tell you;
+            # it is a fact about the fleet.
+            **({"custom": dict(prof.custom)} if prof.custom else {}),
             "project_env": [asdict(s) for s in prof.project_env],
             "default_for": list(prof.default_for),
             "owns_remotes": list(prof.owns_remotes),

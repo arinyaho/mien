@@ -335,6 +335,54 @@ def test_whoami_live_names_google_when_it_cannot_be_probed(runner, mien_cfg, moc
     assert "google" in result.output.lower()
 
 
+def _save_one_profile(prof) -> None:
+    from mien.config import (BackendConfig, Config, SecretNaming, save_config)
+    save_config(Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT,
+                                                slack_token=BUILTIN_SLACK_TOKEN),
+        profiles={prof.name: prof},
+    ))
+
+
+@pytest.mark.parametrize("profile_kwargs, id_", [
+    # A gcloud-login-only google: google IS configured, and the refresh-token
+    # probe still cannot touch it. The message must therefore not claim google is
+    # a supported provider, which is how it read before — a contradiction on the
+    # one profile that hits this raise.
+    (dict(google=dict(email="me@example.com", oauth_client_id="cid",
+                      oauth_client_secret_ref=None, refresh_token_ref=None,
+                      adc_ref=None, gcloud_config_name="personal",
+                      default_project=None)), "gcloud-only-google"),
+    # A custom-only profile: mien is told a variable name, never what the
+    # credential is for, so no probe exists at all.
+    (dict(custom={"NPM_TOKEN": "ref://npm"}), "custom-only"),
+])
+def test_whoami_live_says_it_could_not_check_when_nothing_is_probeable(
+        runner, mien_cfg, mocker, profile_kwargs, id_):
+    """No probeable provider fails closed — but as "could not check", not as a
+    wrong identity, and naming what a probe actually needs."""
+    from mien.config import GoogleService, Profile
+    kwargs = dict(profile_kwargs)
+    if "google" in kwargs:
+        kwargs["google"] = GoogleService(**kwargs["google"])
+    _save_one_profile(Profile(name="personal", **kwargs))
+    mocker.patch("mien.cli.load_backend")
+    mocker.patch("mien.cli.build_env").return_value.env = {}
+
+    result = runner.invoke(main, ["whoami", "personal", "--live"])
+    assert result.exit_code != 0
+    assert "no provider `--live` can probe" in result.output
+    assert "a google with a stored refresh token" in result.output
+    assert "mien login --service google" in result.output
+    assert "could not check" in result.output
+    # And it must not read as a verdict on the identity...
+    assert "not a wrong identity" in result.output
+    # ...nor print a report that looks like one.
+    assert "live identity check" not in result.output
+
+
 def test_whoami_live_names_unchecked_services(runner, mien_cfg, mocker):
     """A profile with slack/notion must not read as fully verified when only
     github was probed."""

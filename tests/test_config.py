@@ -1402,6 +1402,39 @@ def test_custom_round_trips_as_names_pointing_at_refs():
     assert deserialize_config(serialize_config(cfg)) == cfg
 
 
+def test_an_empty_custom_map_is_not_written_at_all():
+    """The write-side shim for OLDER readers, and the reason it exists.
+
+    A mien predating `custom` rejects an unknown *profile* key hard, and that
+    ConfigError takes the whole config down — not just the profile carrying the
+    key. Since this same JSON is what `mien push` stores as the shared manifest,
+    writing `"custom": {}` on a profile that uses nothing new would cost an older
+    machine every identity it has: `mien sync` fails, and `mien init` swallows it
+    into "(manifest check skipped: ...)", exits 0, and leaves the empty config it
+    just wrote. The printed remedy makes it worse — `mien push` from there
+    uploads a custom-less config and empties the map for everyone.
+
+    Omitting the key cannot save a profile that actually *uses* `custom` (asserted
+    below: the key is written then, because the map is the identity). What it buys
+    is that the break is confined to those profiles instead of being fleet-wide.
+    """
+    cfg = Config(
+        schema_version=1,
+        secrets_backend=BackendConfig(type="macos_keychain", options={}),
+        bootstrap={}, secret_naming=SecretNaming(default=BUILTIN_DEFAULT, slack_token=BUILTIN_SLACK_TOKEN),
+        profiles={
+            "plain": Profile(name="plain"),
+            "work": Profile(name="work", custom={"NPM_TOKEN": "ref://npm"}),
+        },
+    )
+    written = json.loads(serialize_config(cfg))["profiles"]
+    assert "custom" not in written["plain"]
+    assert written["work"]["custom"] == {"NPM_TOKEN": "ref://npm"}
+    # Absent is empty on the way back in, so the current reader is unaffected:
+    # the omission says exactly what `{}` said.
+    assert deserialize_config(serialize_config(cfg)) == cfg
+
+
 @pytest.mark.parametrize("value, expect", [
     # A name that is not a shell identifier breaks the loader script `mien use`
     # writes: sourcing it fails at that line and abandons the rest of the file,

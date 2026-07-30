@@ -703,9 +703,15 @@ def _whoami_live(cfg: Config, prof: Profile) -> None:
         store.cleanup()
 
     if not results:
+        # Named as what the probes actually require, not as which services exist:
+        # the google probe needs a stored refresh token, so a gcloud-login-only
+        # google lands here *with* a google configured — and a message listing
+        # "google" as supported would read as a contradiction on that profile.
         raise click.ClickException(
-            f"profile {prof.name!r} has no provider that supports live "
-            "verification (github, aws, or google)"
+            f"profile {prof.name!r} has no provider `--live` can probe — that "
+            "needs github, aws, or a google with a stored refresh token "
+            "(`mien login --service google`, not a gcloud-only login) — so this "
+            "is 'could not check', not a wrong identity."
         )
 
     # Services this profile has but --live did not check. Naming them keeps a

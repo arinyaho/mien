@@ -2265,6 +2265,11 @@ def test_login_name_on_another_service_is_an_error_not_a_silent_ignore(
     ("GH_TOKEN", "already uses for github"),
     ("AWS_PROFILE", "already uses for aws"),
     ("MIEN_PROFILE", "already uses for mien itself"),
+    # Not mien's, but the shell's — and the scrub is the union over all profiles,
+    # so accepting one of these makes every `mien use` anywhere strip it.
+    ("PATH", "how the shell — and mien's own loader — finds every program it runs"),
+    ("HOME", "where the shell, mien and every other tool look for files"),
+    ("TMPDIR", "where mien writes the ephemeral files that carry your credentials"),
 ])
 def test_login_custom_refuses_an_unusable_name_before_reading_a_secret(
     runner, mien_cfg, mocker, name, expect
@@ -2282,6 +2287,29 @@ def test_login_custom_refuses_an_unusable_name_before_reading_a_secret(
     backend.put.assert_not_called()
     # And the flag error blames the flag, not the config it never read.
     assert "The config is at" not in result.output
+
+
+@pytest.mark.parametrize("name", ["MY_PATH", "PATH_TO_KEY", "HOMEBREW_TOKEN"])
+def test_login_custom_accepts_a_name_that_merely_contains_a_critical_one(
+    runner, mien_cfg, mocker, name
+):
+    """The shell-critical rule is exact match, not substring.
+
+    A substring test would refuse ordinary credentials — `PATH_TO_KEY` is a name
+    someone reasonably picks — while protecting nothing extra: the loader emits
+    `unset PATH_TO_KEY`, which touches no variable the shell reads.
+    """
+    backend = mocker.patch("mien.cli.load_backend").return_value
+    backend.put.return_value = "ref://custom"
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main, ["login", "work", "--service", "custom", "--name", name,
+               "--token-stdin"],
+        input="y\nsk-secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(mien_cfg.read_text())["profiles"]["work"]["custom"] == {
+        name: "ref://custom"}
 
 
 def test_login_custom_composes_several_variables_on_one_profile(runner, mien_cfg, mocker):

@@ -94,6 +94,71 @@ BUILTIN_VARS: dict[str, str] = {
 # the moment it exists, and the two cannot drift.
 KNOWN_VARS = list(BUILTIN_VARS)
 
+# Variables a `custom` credential may not be named after, each mapped to what it
+# is — the message quotes the phrase, so a name cannot be listed here without
+# saying why (`mien.config.check_custom_var_name`).
+#
+# One rule, in two halves, and an entry has to satisfy at least one: the
+# machinery that carries out `mien use` / `mien unset` READS this variable as an
+# instruction rather than carrying it as payload, so either (a) `unset`ting it
+# stops the shell or the loader from working, or (b) `export`ing a credential
+# over it puts that credential somewhere nobody asked for. The blast radius is
+# what makes the refusal worth having: `scrub_vars` is the union over EVERY
+# profile, so one such name in one profile makes every `mien use` and every
+# `mien-unset`, in every shell, strip it.
+#
+# Deliberately NOT a denylist of POSIX variables. A long list is unmaintainable
+# and would refuse names that are only ever payload; candidates weighed and left
+# off, each for a reason that can be checked:
+#
+# - `PWD`/`OLDPWD`: zsh and bash re-set `PWD` on the next `cd`, so the `unset` is
+#   self-healing, and mien already distrusts the value it finds (`_trusted_cwd`
+#   validates it with `samefile` and falls back to `os.getcwd()`).
+# - `MIEN_GUARD`/`MIEN_EXEC`/`MIEN_TOKEN`: opt-OUTs, matched against a fixed set
+#   of off-values. Unset or overwritten with a credential, both land on "guard
+#   on" — the safe side — so neither half of the rule is met.
+# - `XDG_CONFIG_HOME`: mien reads it for one non-credential path (the global
+#   gitignore `.mien` goes in), and that write already fails soft on `OSError`.
+# - `LD_PRELOAD`/`DYLD_*`: neither half holds. `unset` does not break the shell,
+#   and exporting a credential leaves the dynamic loader failing to open a
+#   library by that name — it stores no credential anywhere. The remaining
+#   argument, that mien should not be a channel for library injection, is a
+#   security claim this check cannot back: the value comes from the user's own
+#   backend into the user's own shell, granting nothing they could not do with
+#   `export` themselves, and listing them would advertise a sandbox mien does
+#   not implement.
+SHELL_CRITICAL_VARS: dict[str, str] = {
+    # (a) The shell finds every program through it — and so does mien's own
+    # loader: the `mien-use` wrapper runs `command mien`, and the script it evals
+    # runs `rm -f`. Unset, nothing in the shell runs at all.
+    "PATH": "how the shell — and mien's own loader — finds every program it runs",
+    # (a) Tilde expansion, and every tool's idea of where its config lives,
+    # including mien's: `config_path` reads `$HOME/.config/mien/config.json`, so
+    # a credential exported over it hides mien's config from mien.
+    "HOME": "where the shell, mien and every other tool look for files, mien's own config included",
+    # (a) The shell splits every unquoted expansion by it, including inside the
+    # `eval` that loads a profile, so a credential here changes how the shell
+    # parses everything that comes after.
+    "IFS": "how the shell splits every word it parses",
+    # (b) The shell renders it at every prompt, so exporting a credential over it
+    # PRINTS that credential to the terminal on every line — the exact leak
+    # `emit_use` exists to prevent — and it is exported, so child shells too.
+    "PS1": "the prompt the shell renders, and prints, on every line",
+    # (b) mien resolves its ephemeral store from it (`_env_script_dir`,
+    # `EphemeralStore`). Exported over with a credential, the value is not a
+    # directory: mien creates one NAMED for the credential under whatever the
+    # current directory happens to be — a git worktree, say — and drops the
+    # plaintext files there, where `mien doctor --gc` run from anywhere else will
+    # never sweep them.
+    "TMPDIR": "where mien writes the ephemeral files that carry your credentials",
+    # (b) `config_path` honours it, so a credential exported over it points every
+    # later mien command at a config that does not exist — `mien status` reports
+    # nothing, and `mien login` writes a fresh config to a path named for the
+    # credential. The `unset` half misdirects too: a shell deliberately pointed
+    # at another config silently falls back to the default one.
+    "MIEN_CONFIG": "where mien reads and writes the config that holds every profile",
+}
+
 
 def custom_vars(profiles: Mapping[str, Profile]) -> list[str]:
     """Every `custom` variable name any profile in the config defines, sorted.

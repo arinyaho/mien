@@ -395,7 +395,7 @@ def check_custom_var_name(where: str, name: object) -> None:
     own label (``profile 'work': custom``, ``--name``) so the message reads right
     in a config error and in a flag error alike.
 
-    Two ways a name is refused:
+    Three ways a name is refused:
 
     - **Not a shell identifier.** ``mien use`` writes a script that gets sourced,
       so a malformed name breaks the loader itself -- worse here than in
@@ -407,13 +407,23 @@ def check_custom_var_name(where: str, name: object) -> None:
       the order were ever reversed. Which of the two credentials a shell ends up
       carrying must not be settled by statement order, so it is refused and the
       message names the service it would fight.
+    - **Shell-critical.** The loader ``unset``s every managed variable and
+      re-``export``s the active profile's, and the scrub list is the union over
+      every profile (``mien.shell.scrub_vars``). A name the shell or mien itself
+      reads as an instruction -- ``PATH``, ``HOME``, ``TMPDIR`` and the rest of
+      ``SHELL_CRITICAL_VARS`` -- therefore wrecks shells that have nothing to do
+      with the profile that named it: one such name in one profile makes every
+      ``mien use`` and every ``mien-unset`` strip it, everywhere. The exact-match
+      here is the whole rule; ``MY_PATH`` and ``PATH_TO_KEY`` are ordinary names.
+
+    Matching is exact and case-sensitive throughout, like the environment itself.
     """
     _check_env_name(where, name, "ANTHROPIC_API_KEY")
     # Imported here, not at module scope: `mien.shell` imports `mien.env`, which
     # imports this module, so a top-level import would be a cycle. Same shape as
     # `ensure_known_backend_options` below, and reached only for a config that
     # actually declares a custom variable.
-    from mien.shell import BUILTIN_VARS, MIEN_INTERNAL_OWNER
+    from mien.shell import BUILTIN_VARS, MIEN_INTERNAL_OWNER, SHELL_CRITICAL_VARS
     owner = BUILTIN_VARS.get(name)
     if owner:
         # No `--service` to point at for mien's own bookkeeping variables, so the
@@ -428,6 +438,16 @@ def check_custom_var_name(where: str, name: object) -> None:
             f"{owner}. A custom credential cannot share a name with a built-in "
             f"one — which of the two a shell ends up carrying must not be decided "
             f"silently. {remedy}"
+        )
+    critical = SHELL_CRITICAL_VARS.get(name)
+    if critical:
+        raise ConfigError(
+            f"{where}: {name!r} is {critical}. A custom credential cannot take "
+            f"that over: `mien use` unsets every variable mien manages and "
+            f"re-exports the active profile's, and that list is the union over "
+            f"ALL profiles — so this name would strip {name} in every shell that "
+            f"runs `mien use` or `mien-unset`, whichever profile is active. Pick "
+            f"another name."
         )
 
 

@@ -1168,6 +1168,15 @@ def test_custom_round_trips_as_names_pointing_at_refs():
     ({"AWS_SECRET_ACCESS_KEY": "ref://x"}, r"already uses for aws"),
     ({"NOTION_TOKEN": "ref://x"}, r"already uses for notion"),
     ({"MIEN_PROFILE": "ref://x"}, r"already uses for mien itself"),
+    # A name the shell itself reads is worse than a collision: the scrub is the
+    # union over every profile, so this one name makes `mien use <anything>` and
+    # `mien-unset` strip PATH in shells that never touch this profile.
+    ({"PATH": "ref://x"},
+     r"profile 'work': custom: 'PATH' is how the shell — and mien's own loader — "
+     r"finds every program it runs"),
+    ({"PS1": "ref://x"}, r"'PS1' is the prompt the shell renders"),
+    ({"IFS": "ref://x"}, r"'IFS' is how the shell splits every word it parses"),
+    ({"MIEN_CONFIG": "ref://x"}, r"'MIEN_CONFIG' is where mien reads and writes the config"),
     # The value is a REFERENCE, and a non-string one dies in `backend.get` deep
     # inside `mien use`, long after the config that named it.
     ({"ANTHROPIC_API_KEY": 5},
@@ -1205,6 +1214,37 @@ def test_every_builtin_variable_is_refused_as_a_custom_name():
     for var in BUILTIN_VARS:
         with pytest.raises(ConfigError, match="already uses for"):
             deserialize_config(_raw_with_custom({var: "ref://x"}))
+
+
+def test_every_shell_critical_variable_is_refused_as_a_custom_name():
+    """Derived from the same map, so an entry added later is covered too.
+
+    Each refusal quotes that map's description, which is what keeps a name from
+    being listed without a reason a reader can weigh.
+    """
+    from mien.shell import SHELL_CRITICAL_VARS
+    for var, description in SHELL_CRITICAL_VARS.items():
+        with pytest.raises(ConfigError) as exc:
+            deserialize_config(_raw_with_custom({var: "ref://x"}))
+        assert description in str(exc.value)
+        assert "Pick another name." in str(exc.value)
+
+
+def test_the_shell_critical_list_does_not_overlap_the_builtins():
+    """Two rules, two disjoint sets — a name in both would get the wrong message."""
+    from mien.shell import BUILTIN_VARS, SHELL_CRITICAL_VARS
+    assert not set(BUILTIN_VARS) & set(SHELL_CRITICAL_VARS)
+
+
+@pytest.mark.parametrize("name", ["MY_PATH", "PATH_TO_KEY", "HOMEBREW_TOKEN", "TMPDIR_KEY"])
+def test_a_name_merely_containing_a_shell_critical_one_is_accepted(name):
+    """Exact match, not substring: `PATH_TO_KEY` is an ordinary credential name.
+
+    The loader emitting `unset PATH_TO_KEY` touches nothing the shell reads, so a
+    substring rule would refuse usable names and protect nothing.
+    """
+    cfg = deserialize_config(_raw_with_custom({name: "ref://x"}))
+    assert cfg.profiles["work"].custom == {name: "ref://x"}
 
 
 def test_a_custom_name_is_a_known_profile_key_not_an_unknown_one():

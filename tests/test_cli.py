@@ -2270,6 +2270,12 @@ def test_login_name_on_another_service_is_an_error_not_a_silent_ignore(
     ("PATH", "how the shell — and mien's own loader — finds every program it runs"),
     ("HOME", "where the shell, mien and every other tool look for files"),
     ("TMPDIR", "where mien writes the ephemeral files that carry your credentials"),
+    # Not read as an instruction but as a safety signal, and mien reads its
+    # absence as "no agent is watching": accepting one of these makes every
+    # `mien use` anywhere emit `unset CLAUDECODE`, disarming the refusals in
+    # `mien token` and `mien exec` with nothing to show that it happened.
+    ("CLAUDECODE", "mien reads it to decide whether an agent is driving"),
+    ("MIEN_CAPTURED", "the marker you set yourself to tell mien this harness records"),
 ])
 def test_login_custom_refuses_an_unusable_name_before_reading_a_secret(
     runner, mien_cfg, mocker, name, expect
@@ -2289,15 +2295,17 @@ def test_login_custom_refuses_an_unusable_name_before_reading_a_secret(
     assert "The config is at" not in result.output
 
 
-@pytest.mark.parametrize("name", ["MY_PATH", "PATH_TO_KEY", "HOMEBREW_TOKEN"])
+@pytest.mark.parametrize("name", ["MY_PATH", "PATH_TO_KEY", "HOMEBREW_TOKEN",
+                                  "MY_CLAUDECODE", "CLAUDECODE_EXTRA"])
 def test_login_custom_accepts_a_name_that_merely_contains_a_critical_one(
     runner, mien_cfg, mocker, name
 ):
-    """The shell-critical rule is exact match, not substring.
+    """The shell-critical and capture-marker rules are exact match, not substring.
 
     A substring test would refuse ordinary credentials — `PATH_TO_KEY` is a name
     someone reasonably picks — while protecting nothing extra: the loader emits
-    `unset PATH_TO_KEY`, which touches no variable the shell reads.
+    `unset PATH_TO_KEY`, which touches no variable the shell reads, and `unset
+    MY_CLAUDECODE` clears no marker `capture_context` ever looks at.
     """
     backend = mocker.patch("mien.cli.load_backend").return_value
     backend.put.return_value = "ref://custom"

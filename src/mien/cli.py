@@ -54,7 +54,8 @@ from mien.resolve import (AmbiguousScope, claimed_profile, git_author_email,
                           git_origin_remote, profile_for_email, resolve_profile)
 from mien.verify import Status, probe_aws, probe_github, probe_google, run_probe_safely
 from mien.secret_naming import render_name
-from mien.shell import custom_vars, emit_unset, emit_use, render_shell_init
+from mien.shell import (CAPTURE_MARKER_VARS, custom_vars, emit_unset, emit_use,
+                        render_shell_init)
 from mien.statusline import guard_reason, render_segment
 
 
@@ -1761,13 +1762,6 @@ def prompt_cmd() -> None:
 
 _GUARD_OFF = {"off", "0", "false", "no"}
 
-# Environment markers set by agent harnesses that record a command's output.
-# Presence means: anything this process writes to stdout may be captured into a
-# transcript that outlives the command — so printing a raw secret there is not a
-# transient exposure but a durable one. The list is a heuristic and deliberately
-# fails *open*: an unrecognized harness is not detected, so this is a backstop
-# for the common case, never a guarantee.
-_CAPTURE_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MIEN_CAPTURED")
 _CAPTURE_OK = {"capture-ok", "off"}
 
 # What `mien exec` puts in the environment for each service `mien token` prints,
@@ -1812,8 +1806,15 @@ _HTTP_HINT_FOR = {
 
 
 def capture_context() -> str | None:
-    """The harness marker suggesting this command's stdout is being recorded."""
-    for marker in _CAPTURE_MARKERS:
+    """The harness marker suggesting this command's stdout is being recorded.
+
+    Presence-gated: any one marker set means "an agent is driving". The names come
+    from `mien.shell.CAPTURE_MARKER_VARS` rather than a tuple of their own, and
+    that is the point — the same map is what `check_custom_var_name` refuses as a
+    `custom` credential name, so a marker cannot be detected here while the scrub
+    is still free to `unset` it.
+    """
+    for marker in CAPTURE_MARKER_VARS:
         if os.environ.get(marker, "").strip():
             return marker
     return None

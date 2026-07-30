@@ -1,6 +1,6 @@
 import pytest
 
-from mien.cli import _CAPTURE_MARKERS
+from mien.shell import CAPTURE_MARKER_VARS
 
 
 @pytest.fixture(autouse=True)
@@ -17,5 +17,5 @@ def _no_capture_context(monkeypatch):
     refusal, so an ambient `MIEN_TOKEN=capture-ok` would silently turn the
     refusal tests green-by-default.
     """
-    for marker in (*_CAPTURE_MARKERS, "MIEN_TOKEN"):
+    for marker in (*CAPTURE_MARKER_VARS, "MIEN_TOKEN"):
         monkeypatch.delenv(marker, raising=False)

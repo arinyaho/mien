@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from mien.env import EnvBundle
 from mien.shell import emit_unset, emit_use
 
@@ -154,6 +156,45 @@ def test_known_vars_is_derived_from_the_builtin_owner_map():
     assert KNOWN_VARS == list(BUILTIN_VARS)
     assert BUILTIN_VARS["GH_TOKEN"] == "github"
     assert BUILTIN_VARS["GIT_SSH_COMMAND"] == "github"
+
+
+def test_the_capture_markers_the_detector_reads_are_exactly_the_refused_ones(monkeypatch):
+    """One list, two readers — pinned by injecting a marker neither hard-codes.
+
+    The bug this pins: `capture_context` detected three markers that
+    `check_custom_var_name` did not refuse, so `mien login --name CLAUDECODE` was
+    accepted and the union-scrub then emitted `unset CLAUDECODE` in every shell,
+    silently disarming the `mien token` and `mien exec` refusals. A test that
+    listed the three names would go stale the moment a fourth is added — the
+    reopening would look exactly like today's green suite. So instead: add a
+    marker at runtime and assert BOTH sides move. A hand-copied list on either
+    side fails this.
+    """
+    from mien.cli import capture_context
+    from mien.config import ConfigError, check_custom_var_name
+    from mien.shell import CAPTURE_MARKER_VARS
+
+    monkeypatch.setitem(CAPTURE_MARKER_VARS, "HERMES_SESSION",
+                        "the marker a made-up harness sets")
+    monkeypatch.setenv("HERMES_SESSION", "1")
+    # The detector picked it up...
+    assert capture_context() == "HERMES_SESSION"
+    # ...and so did the refusal, from the same map, quoting the same phrase.
+    with pytest.raises(ConfigError) as exc:
+        check_custom_var_name("--name", "HERMES_SESSION")
+    assert "the marker a made-up harness sets" in str(exc.value)
+
+
+def test_capture_markers_are_not_in_the_scrub_list():
+    """They are refused as custom names, so nothing can put them in the scrub.
+
+    Belt and braces on the other side of the same coupling: were a marker ever
+    listed as a built-in instead, `KNOWN_VARS` would carry it and every `mien use`
+    would clear it — the same disarming, by a different route.
+    """
+    from mien.shell import CAPTURE_MARKER_VARS, scrub_vars
+    profiles = {"work": _profile("work", custom={"ANTHROPIC_API_KEY": "ref://a"})}
+    assert not set(CAPTURE_MARKER_VARS) & set(scrub_vars(profiles))
 
 
 def test_switching_to_a_profile_without_a_custom_var_still_clears_it():

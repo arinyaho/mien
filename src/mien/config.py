@@ -395,7 +395,7 @@ def check_custom_var_name(where: str, name: object) -> None:
     own label (``profile 'work': custom``, ``--name``) so the message reads right
     in a config error and in a flag error alike.
 
-    Three ways a name is refused:
+    Four ways a name is refused:
 
     - **Not a shell identifier.** ``mien use`` writes a script that gets sourced,
       so a malformed name breaks the loader itself -- worse here than in
@@ -415,6 +415,14 @@ def check_custom_var_name(where: str, name: object) -> None:
       with the profile that named it: one such name in one profile makes every
       ``mien use`` and every ``mien-unset`` strip it, everywhere. The exact-match
       here is the whole rule; ``MY_PATH`` and ``PATH_TO_KEY`` are ordinary names.
+    - **An agent-harness capture marker.** Same blast radius, different reason,
+      which is why ``mien.shell.CAPTURE_MARKER_VARS`` is its own map and gets its
+      own message: neither half of the shell-critical rule holds (``unset
+      CLAUDECODE`` breaks nothing, and a credential exported over it still reads
+      as "detected"). What disqualifies it is polarity -- mien reads the marker as
+      a safety signal whose ABSENCE is the permissive state, so the scrub's
+      ``unset`` is what moves it to the unsafe side, silently disarming the
+      refusals in ``mien token`` and ``mien exec``.
 
     Matching is exact and case-sensitive throughout, like the environment itself.
     """
@@ -423,7 +431,12 @@ def check_custom_var_name(where: str, name: object) -> None:
     # imports this module, so a top-level import would be a cycle. Same shape as
     # `ensure_known_backend_options` below, and reached only for a config that
     # actually declares a custom variable.
-    from mien.shell import BUILTIN_VARS, MIEN_INTERNAL_OWNER, SHELL_CRITICAL_VARS
+    from mien.shell import (
+        BUILTIN_VARS,
+        CAPTURE_MARKER_VARS,
+        MIEN_INTERNAL_OWNER,
+        SHELL_CRITICAL_VARS,
+    )
     owner = BUILTIN_VARS.get(name)
     if owner:
         # No `--service` to point at for mien's own bookkeeping variables, so the
@@ -448,6 +461,19 @@ def check_custom_var_name(where: str, name: object) -> None:
             f"ALL profiles — so this name would strip {name} in every shell that "
             f"runs `mien use` or `mien-unset`, whichever profile is active. Pick "
             f"another name."
+        )
+    marker = CAPTURE_MARKER_VARS.get(name)
+    if marker:
+        raise ConfigError(
+            f"{where}: {name!r} is {marker}. mien reads it to decide whether an "
+            f"agent is driving, and reads its ABSENCE as 'no agent' — so a custom "
+            f"credential cannot take it over: `mien use` unsets every variable "
+            f"mien manages, and that list is the union over ALL profiles, so this "
+            f"name would emit `unset {name}` in every shell that runs `mien use` "
+            f"or `mien-unset`, whichever profile is active. That disarms the "
+            f"refusals that keep `mien token` from printing a secret into a "
+            f"recorded transcript and `mien exec` from running under the wrong "
+            f"identity, and it disarms them silently. Pick another name."
         )
 
 

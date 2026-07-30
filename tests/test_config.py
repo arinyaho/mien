@@ -1177,6 +1177,16 @@ def test_custom_round_trips_as_names_pointing_at_refs():
     ({"PS1": "ref://x"}, r"'PS1' is the prompt the shell renders"),
     ({"IFS": "ref://x"}, r"'IFS' is how the shell splits every word it parses"),
     ({"MIEN_CONFIG": "ref://x"}, r"'MIEN_CONFIG' is where mien reads and writes the config"),
+    # A capture marker is worse still, and quieter: the same union-scrub emits
+    # `unset CLAUDECODE` in every shell, which disarms the refusals that keep a
+    # secret out of a recorded transcript — and nothing looks broken afterwards.
+    ({"CLAUDECODE": "ref://x"},
+     r"profile 'work': custom: 'CLAUDECODE' is the marker Claude Code sets to say "
+     r"an agent, not a person, is driving this shell"),
+    ({"MIEN_CAPTURED": "ref://x"},
+     r"'MIEN_CAPTURED' is the marker you set yourself to tell mien this harness "
+     r"records what mien prints"),
+    ({"CLAUDE_CODE_ENTRYPOINT": "ref://x"}, r"agent entrypoint that is driving this shell"),
     # The value is a REFERENCE, and a non-string one dies in `backend.get` deep
     # inside `mien use`, long after the config that named it.
     ({"ANTHROPIC_API_KEY": 5},
@@ -1230,10 +1240,69 @@ def test_every_shell_critical_variable_is_refused_as_a_custom_name():
         assert "Pick another name." in str(exc.value)
 
 
+def test_every_capture_marker_is_refused_as_a_custom_name():
+    """Derived from the map the DETECTOR reads, so a marker added later is covered.
+
+    Each refusal quotes that map's description of what sets the marker, which is
+    what keeps a name from being listed without a reason a reader can weigh.
+    """
+    from mien.shell import CAPTURE_MARKER_VARS
+    for var, description in CAPTURE_MARKER_VARS.items():
+        with pytest.raises(ConfigError) as exc:
+            deserialize_config(_raw_with_custom({var: "ref://x"}))
+        assert description in str(exc.value)
+        assert "Pick another name." in str(exc.value)
+
+
+def test_the_capture_marker_refusal_explains_what_clearing_it_would_disarm():
+    """The reason is not "the shell needs it" — no shell does. It is polarity.
+
+    `unset CLAUDECODE` breaks nothing and exporting a credential over it leaves it
+    non-empty, i.e. still detected. The harm is the other direction: mien reads the
+    marker's ABSENCE as "no agent is watching", so the scrub's `unset` turns two
+    refusals off while everything still looks fine. A message that only said "pick
+    another name" would leave a reader with no way to weigh that.
+    """
+    with pytest.raises(ConfigError) as exc:
+        deserialize_config(_raw_with_custom({"CLAUDECODE": "ref://x"}))
+    message = str(exc.value)
+    assert "mien reads it to decide whether an agent is driving" in message
+    assert "ABSENCE as 'no agent'" in message
+    assert "unset CLAUDECODE" in message
+    assert "`mien token`" in message and "`mien exec`" in message
+    assert "silently" in message
+
+
 def test_the_shell_critical_list_does_not_overlap_the_builtins():
     """Two rules, two disjoint sets — a name in both would get the wrong message."""
     from mien.shell import BUILTIN_VARS, SHELL_CRITICAL_VARS
     assert not set(BUILTIN_VARS) & set(SHELL_CRITICAL_VARS)
+
+
+def test_the_three_refused_sets_are_pairwise_disjoint():
+    """Three reasons, three disjoint maps: a name in two would get one message.
+
+    The capture markers are refused for a reason the shell-critical rule does not
+    state (their absence is the permissive state, not a broken shell), so they are
+    held apart rather than folded in — and a marker that drifted into either other
+    map would be explained by the wrong sentence.
+    """
+    from mien.shell import BUILTIN_VARS, CAPTURE_MARKER_VARS, SHELL_CRITICAL_VARS
+    assert not set(CAPTURE_MARKER_VARS) & set(BUILTIN_VARS)
+    assert not set(CAPTURE_MARKER_VARS) & set(SHELL_CRITICAL_VARS)
+
+
+@pytest.mark.parametrize(
+    "name", ["MY_CLAUDECODE", "CLAUDECODE_EXTRA", "MIEN_CAPTURED_AT",
+             "CLAUDE_CODE_ENTRYPOINT_URL"])
+def test_a_name_merely_containing_a_capture_marker_is_accepted(name):
+    """Exact match, not substring — `capture_context` reads exact names too.
+
+    A substring rule would refuse usable credential names while protecting
+    nothing: `unset MY_CLAUDECODE` clears no marker mien ever looks at.
+    """
+    cfg = deserialize_config(_raw_with_custom({name: "ref://x"}))
+    assert cfg.profiles["work"].custom == {name: "ref://x"}
 
 
 @pytest.mark.parametrize("name", ["MY_PATH", "PATH_TO_KEY", "HOMEBREW_TOKEN", "TMPDIR_KEY"])

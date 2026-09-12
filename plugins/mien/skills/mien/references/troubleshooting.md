@@ -11,7 +11,7 @@
 | `mien env sync` warns that a scope variable is unexpandable | `~/.zshenv` is read before `~/.zshrc`/`~/.zprofile`, so a variable you define there is unset when the scope is evaluated — `$VAR/*` collapses to `/*` and matches everything | Write a literal path or `~` in `project_env.match` |
 | `mien token google` fails with 401 | Refresh token revoked | `mien login personal --service google` again |
 | `mien token` refuses: `refusing to print a raw secret` | It detected a harness that records stdout, where a printed secret lands in a durable transcript | Use `mien exec <profile> -- <cmd...>` so the credential arrives in the environment. If a bare string is genuinely needed: `MIEN_TOKEN=capture-ok mien token ...` or `--force` |
-| `mien token` prints the secret inside a non-Claude agent (Codex, Hermes) | Only Claude Code's markers are recognized built-in, so the refusal never armed | Set `MIEN_CAPTURED=1` in that harness's environment; it triggers the same refusal anywhere |
+| `mien token` prints the secret inside an unrecognized agent harness (for example, Hermes) | The harness has no built-in marker, so the refusal never armed | Set `MIEN_CAPTURED=1` in that harness's environment; it triggers the same refusal anywhere |
 | `--secret-cmd failed (exit N)` | The helper command errored (wrong op:// ref, not signed in) | Run the command alone first; `op signin` / `gcloud auth login` as needed |
 | `--secret-cmd produced empty output` | Command succeeded but printed nothing | Check the reference path; ensure the field exists |
 | Secret leaked into shell history / agent transcript | Passed as a CLI arg, or an agent ran `mien login` | Rotate the secret; re-add via hidden prompt or `--secret-cmd` reference |

@@ -192,6 +192,7 @@ SHELL_CRITICAL_VARS: dict[str, str] = {
 CAPTURE_MARKER_VARS: dict[str, str] = {
     "CLAUDECODE": "the marker Claude Code sets to say an agent, not a person, is driving this shell",
     "CLAUDE_CODE_ENTRYPOINT": "the marker Claude Code sets to name the agent entrypoint that is driving this shell",
+    "CODEX_THREAD_ID": "the marker Codex sets to identify the agent thread driving this shell",
     "MIEN_CAPTURED": "the marker you set yourself to tell mien this harness records what mien prints",
 }
 

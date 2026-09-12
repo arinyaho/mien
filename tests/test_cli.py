@@ -1773,6 +1773,19 @@ def test_token_refuses_where_stdout_is_recorded(runner, mien_cfg, mocker):
     assert "CLAUDECODE" in result.output
 
 
+def test_token_refuses_in_a_codex_session(runner, mien_cfg, mocker):
+    _notion_profile(runner, mocker)
+    result = runner.invoke(
+        main, ["token", "notion"],
+        env={"MIEN_PROFILE": "personal", "MIEN_CONFIG": str(mien_cfg),
+             "CODEX_THREAD_ID": "thread-example"},
+    )
+    assert result.exit_code != 0
+    assert "my-secret-notion-token" not in result.output
+    assert "mien exec" in result.output
+    assert "CODEX_THREAD_ID" in result.output
+
+
 def _atlassian_profile(runner, mocker, secret=b"my-secret-api-token"):
     """A configured profile whose atlassian API token is `secret`."""
     backend = mocker.patch("mien.cli.load_backend").return_value

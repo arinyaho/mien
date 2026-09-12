@@ -44,7 +44,7 @@ mien exec personal -- claude -p "…"        # arrives as $ANTHROPIC_API_KEY
 mien logout personal --service custom --name ANTHROPIC_API_KEY
 ```
 
-`--name` is the variable name. It must be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`), and it may not be any of: a name mien already uses for a built-in service (`GH_TOKEN`, `AWS_PROFILE`, `NOTION_TOKEN`, … — the refusal names the service it would fight), one the shell or mien itself reads as an instruction (`PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG`), or one of the agent-harness capture markers mien reads to know an agent is driving (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `MIEN_CAPTURED`). All four refusals fire at `login` time and again whenever the config is parsed, so a hand-edited config fails the same way; `schema.md` carries the full list and the reason for each.
+`--name` is the variable name. It must be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`), and it may not be any of: a name mien already uses for a built-in service (`GH_TOKEN`, `AWS_PROFILE`, `NOTION_TOKEN`, … — the refusal names the service it would fight), one the shell or mien itself reads as an instruction (`PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG`), or one of the agent-harness capture markers mien reads to know an agent is driving (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`, `MIEN_CAPTURED`). All four refusals fire at `login` time and again whenever the config is parsed, so a hand-edited config fails the same way; `schema.md` carries the full list and the reason for each.
 
 The config stores only a reference, so the secret stays in the backend. `mien status` reports the variable as `<set>`, never its value, and there is no `mien token custom` — `mien exec` is the interface.
 

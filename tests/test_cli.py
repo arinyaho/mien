@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from conftest import make_config
@@ -55,7 +56,8 @@ def test_status_prints_a_value_only_for_the_pinned_non_secret_vars(
                if "=MARKER-" in ln}
     assert visible == {
         "CLOUDSDK_ACTIVE_CONFIG_NAME", "CLOUDSDK_CORE_PROJECT",
-        "GIT_SSH_COMMAND", "MIEN_SLACK_TOKENS", "AWS_PROFILE",
+        "GIT_SSH_COMMAND", "MIEN_SLACK_TOKENS", "MIEN_SLACK_DEFAULT_WORKSPACE",
+        "AWS_PROFILE",
         "AWS_DEFAULT_REGION", "OCI_CLI_PROFILE", "OCI_CLI_CONFIG_FILE",
         "ATLASSIAN_EMAIL", "ATLASSIAN_BASE_URL",
     }
@@ -173,6 +175,7 @@ def test_whoami_names_the_variables_of_a_service_the_profile_lacks(
     env = {v["var"]: v for v in json.loads(out.output)["env"]}
     assert env["GH_TOKEN"] == {"var": "GH_TOKEN", "service": "github",
                                "set": False, "configured": False,
+                               "value_type": "value",
                                "note": "this profile configures no github"}
     assert env["NOTION_TOKEN"]["set"] and env["NOTION_TOKEN"]["configured"]
 
@@ -2246,6 +2249,41 @@ def test_run_removes_ephemeral_files_after_child_exits(runner, tmp_path, monkeyp
     assert list((tmp_path / "mien").iterdir()) == []
 
 
+def test_agent_exec_exposes_only_the_0600_slack_map_and_redacts_child_errors(
+    runner, tmp_path, monkeypatch, mocker
+):
+    """Reproduce the incident without allowing its sentinel into the transcript."""
+    from mien.config import Profile, SlackWorkspace, save_config
+
+    sentinel = "xoxp-SENTINEL-DO-NOT-LEAK"
+    monkeypatch.setenv("MIEN_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("CODEX_THREAD_ID", "test-thread")
+    save_config(make_config(profiles={"work": Profile(
+        name="work",
+        slack=[SlackWorkspace(workspace="team-a", user_token_ref="ref://slack")],
+    )}))
+    mocker.patch("mien.cli.load_backend").return_value.get.return_value = sentinel.encode()
+
+    code = (
+        "import json, os, pathlib, stat; "
+        "p=pathlib.Path(os.environ['MIEN_SLACK_TOKENS']); "
+        "assert stat.S_IMODE(p.stat().st_mode)==0o600; "
+        "assert 'MIEN_SLACK_DEFAULT_TOKEN' not in os.environ; "
+        "assert os.environ['MIEN_SLACK_DEFAULT_WORKSPACE']=='team-a'; "
+        "token=json.loads(p.read_text())['team-a']; "
+        "open(token)"
+    )
+    result = runner.invoke(
+        main, ["exec", "work", "--", sys.executable, "-c", code]
+    )
+
+    assert result.exit_code != 0
+    assert sentinel not in result.output
+    assert "[REDACTED]" in result.output
+    assert list((tmp_path / "mien").iterdir()) == []
+
+
 def test_run_names_the_remedy_when_the_directory_is_unclaimed(runner, tmp_path, monkeypatch):
     loose = tmp_path / "elsewhere"
     loose.mkdir()
@@ -3028,8 +3066,11 @@ class TestProfileExportsAreDiscoverable:
         env = json.loads(runner.invoke(main, ["whoami", "work", "--json"]).output)["env"]
         slack = {e["var"]: e for e in env if e["service"] == "slack"}
         assert slack["MIEN_SLACK_TOKENS"]["set"] is True
-        # one workspace, so the convenience variable is there too
-        assert slack["MIEN_SLACK_DEFAULT_TOKEN"]["set"] is True
+        assert slack["MIEN_SLACK_TOKENS"]["value_type"] == "credential_file_path"
+        # One workspace gets only a non-secret selector by default.
+        assert slack["MIEN_SLACK_DEFAULT_WORKSPACE"]["set"] is True
+        assert slack["MIEN_SLACK_DEFAULT_WORKSPACE"]["value_type"] == "selector"
+        assert slack["MIEN_SLACK_DEFAULT_TOKEN"]["set"] is False
         assert all("value" not in e for e in env)
 
     def test_a_variable_the_profile_does_not_get_is_reported_as_unset(

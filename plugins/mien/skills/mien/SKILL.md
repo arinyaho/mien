@@ -196,7 +196,7 @@ What each service contributes, when the profile configures it:
 | `github` | `GH_TOKEN` when a token is stored; `GIT_SSH_COMMAND` when an SSH key is configured (stored key or `ssh_key_path`) | an SSH-only `github` identity sets no `GH_TOKEN` at all, so `gh` keeps running on whatever ambient token the overlay left in place |
 | `google` | `CLOUDSDK_ACTIVE_CONFIG_NAME`; `CLOUDSDK_CORE_PROJECT` when a default project is set; `GOOGLE_APPLICATION_CREDENTIALS` when OAuth credentials are stored | the credentials variable is a **file path**, not a token; a gcloud-only Google identity sets only the `CLOUDSDK_` pair |
 | `notion` | `NOTION_TOKEN` | |
-| `slack` | `MIEN_SLACK_TOKENS` (path to a 0600 JSON map) + `MIEN_SLACK_DEFAULT_TOKEN` when there is exactly one workspace | |
+| `slack` | `MIEN_SLACK_TOKENS` (path to a 0600 JSON map) + non-secret `MIEN_SLACK_DEFAULT_WORKSPACE` when there is exactly one workspace | Raw tokens are never exported in an agent harness |
 | `aws` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` when keys are stored; `AWS_PROFILE` when a profile name is set; `AWS_DEFAULT_REGION` when a region is set | independent, so a profile carrying all three sets all four variables |
 | `oci` | `OCI_CLI_PROFILE`, `OCI_CLI_CONFIG_FILE` | |
 | `custom` | whatever names the user chose | `whoami` lists the names |
@@ -217,14 +217,16 @@ access token — but that is exactly the case the harness refusal covers, so it 
 For Slack (multi-workspace per profile):
 
 ```bash
-# $MIEN_SLACK_TOKENS is a path to a 0600 file; resolve the token in the child
-# shell so it never lands in the agent's own shell or the transcript
-$MIEN exec work-foo -- sh -c 'TOKEN=$(jq -r ".\"team-a\"" "$MIEN_SLACK_TOKENS");
-  curl -s -H "Authorization: Bearer $TOKEN" \
-    https://slack.com/api/conversations.list'
+# Resolve from the 0600 map inside the child. Feed curl's header through stdin,
+# not argv, so the token reaches neither the parent shell nor ps output.
+$MIEN exec work-foo -- sh <<'SH'
+TOKEN=$(jq -r --arg ws "$MIEN_SLACK_DEFAULT_WORKSPACE" '.[$ws]' "$MIEN_SLACK_TOKENS")
+printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
+  curl -sK - --url https://slack.com/api/conversations.list
+SH
 ```
 
-If the profile has only one workspace, `$MIEN_SLACK_DEFAULT_TOKEN` is also exported.
+If the profile has only one workspace, `$MIEN_SLACK_DEFAULT_WORKSPACE` names it without carrying a credential. `MIEN_SLACK_DEFAULT_TOKEN` is legacy-only: it requires `MIEN_SLACK_LEGACY_DEFAULT_TOKEN=1` in a human terminal and is never exported when `CODEX_THREAD_ID`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, or `MIEN_CAPTURED` is present.
 
 There is deliberately no `mien token slack`: a profile may hold several workspaces, so there is no single "the token" to print — the credential is a map, and `exec` is the interface. Asking for one says so and points here rather than failing with a bare "invalid choice". The same holds for `aws`, `oci`, `github` and `custom` — each names the `exec` form that works.
 

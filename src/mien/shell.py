@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mien.config import Profile
 from mien.env import BUILTIN_VARS, MIEN_INTERNAL_OWNER, EnvBundle
+from mien.security import CAPTURE_MARKER_VARS
 
 # The shell wrappers, as one canonical source. `mien shell-init` prints this so a
 # user can wire it up with `eval "$(mien shell-init)"` — no repo checkout needed,
@@ -80,6 +81,7 @@ NON_SECRET_VARS: frozenset[str] = frozenset({
     "GOOGLE_APPLICATION_CREDENTIALS",   # a path to a 0600 file, not the token
     "GIT_SSH_COMMAND",                  # `ssh -i <path>`
     "MIEN_SLACK_TOKENS",                # a path to the 0600 workspace map
+    "MIEN_SLACK_DEFAULT_WORKSPACE",     # a workspace name, not a token
     "AWS_PROFILE",
     "AWS_DEFAULT_REGION",
     "OCI_CLI_PROFILE",
@@ -140,11 +142,12 @@ SHELL_CRITICAL_VARS: dict[str, str] = {
     "MIEN_CONFIG": "where mien reads and writes the config that holds every profile",
 }
 
-# Markers that say an agent harness is recording this command's output, mapped
-# to what sets each — the refusal quotes the phrase. Presence means anything on
-# stdout may land in a transcript that outlives the command, so `mien token`
-# refuses to print a secret and `mien exec` refuses a wrong identity. The set is
-# a heuristic and fails *open*: an unrecognized harness is not detected.
+# `CAPTURE_MARKER_VARS` is imported from `mien.security`: markers that say an
+# agent harness is recording this command's output, mapped to what sets each —
+# the refusal quotes the phrase. Presence means anything on stdout may land in a
+# transcript that outlives the command, so `mien token` refuses to print a
+# secret and `mien exec` refuses a wrong identity. The set is a heuristic and
+# fails *open*: an unrecognized harness is not detected.
 #
 # The ONE list of these names: `cli.capture_context` reads it to detect a
 # harness, `config.check_custom_var_name` to refuse the same names as `custom`
@@ -158,14 +161,6 @@ SHELL_CRITICAL_VARS: dict[str, str] = {
 # `scrub_vars`'s `unset` is what moves it to the unsafe side. Same blast radius as the
 # other rule, quieter damage: a broken PATH is self-evident, a disarmed refusal
 # shows up only as a secret printed when you expected it withheld.
-CAPTURE_MARKER_VARS: dict[str, str] = {
-    "CLAUDECODE": "the marker Claude Code sets to say an agent, not a person, is driving this shell",
-    "CLAUDE_CODE_ENTRYPOINT": "the marker Claude Code sets to name the agent entrypoint that is driving this shell",
-    "CODEX_THREAD_ID": "the marker Codex sets to identify the agent thread driving this shell",
-    "MIEN_CAPTURED": "the marker you set yourself to tell mien this harness records what mien prints",
-}
-
-
 def custom_vars(profiles: Mapping[str, Profile]) -> list[str]:
     """Every `custom` variable name any profile in the config defines, sorted.
 

@@ -18,7 +18,8 @@ Each variable is exported only into the shell that ran `mien use` / `mien exec` 
 | `GH_TOKEN` | — (token value in env) | per-shell |
 | `GIT_SSH_COMMAND` | pid-keyed ephemeral key, or a static `ssh_key_path` | per-shell if ephemeral; the static key file is shared |
 | `MIEN_SLACK_TOKENS` | `$TMPDIR/mien/<pid>-<profile>-slack.json` | per-shell (pid-keyed file) |
-| `MIEN_SLACK_DEFAULT_TOKEN` | — (token value in env) | per-shell |
+| `MIEN_SLACK_DEFAULT_WORKSPACE` | — (non-secret selector) | per-shell |
+| `MIEN_SLACK_DEFAULT_TOKEN` | — (legacy token value; explicit non-agent opt-in only) | per-shell; never exported to an agent harness |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — (values) | per-shell |
 | `AWS_PROFILE` | `~/.aws/credentials`, `~/.aws/config` | **shared store** — see warnings |
 | `AWS_DEFAULT_REGION` | — (value) | per-shell |

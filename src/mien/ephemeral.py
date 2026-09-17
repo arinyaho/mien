@@ -20,6 +20,10 @@ class EphemeralStore:
         path = self.root / f"{self.pid}-{profile}-{kind}.json"
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
+            # The mode argument applies only when the file is created. A stale
+            # deterministic path may already exist with loosened permissions;
+            # restore the credential boundary before writing new bytes.
+            os.fchmod(fd, 0o600)
             os.write(fd, data)
         finally:
             os.close(fd)

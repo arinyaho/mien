@@ -131,6 +131,10 @@ def test_github_ssh_key_ref_materializes_ephemeral_file(monkeypatch, tmp_path, f
 
 def test_slack_writes_workspace_map(monkeypatch, tmp_path, fake_backend):
     monkeypatch.setenv("TMPDIR", str(tmp_path))
+    stale = tmp_path / "mien" / "444-p-slack.json"
+    stale.parent.mkdir()
+    stale.write_text("stale")
+    stale.chmod(0o644)
     prof = Profile(
         name="p",
         slack=[
@@ -148,7 +152,33 @@ def test_slack_writes_workspace_map(monkeypatch, tmp_path, fake_backend):
         slack=[SlackWorkspace(workspace="team-a", user_token_ref="slack-team-a-ref")],
     )
     b2 = build_env(prof2, fake_backend, pid=555)
-    assert b2.env["MIEN_SLACK_DEFAULT_TOKEN"] == "xoxp-aaa"
+    assert b2.env["MIEN_SLACK_DEFAULT_WORKSPACE"] == "team-a"
+    assert "MIEN_SLACK_DEFAULT_TOKEN" not in b2.env
+
+
+def test_slack_legacy_raw_token_requires_explicit_non_agent_opt_in(
+    monkeypatch, tmp_path, fake_backend
+):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("MIEN_SLACK_LEGACY_DEFAULT_TOKEN", "1")
+    prof = Profile(
+        name="solo",
+        slack=[SlackWorkspace(workspace="team-a", user_token_ref="slack-team-a-ref")],
+    )
+
+    terminal = build_env(prof, fake_backend, pid=556)
+    assert terminal.env["MIEN_SLACK_DEFAULT_TOKEN"] == "xoxp-aaa"
+    assert terminal.env["MIEN_SLACK_DEFAULT_WORKSPACE"] == "team-a"
+
+    for index, marker in enumerate(
+        ("CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MIEN_CAPTURED"),
+        start=557,
+    ):
+        monkeypatch.setenv(marker, "")  # presence alone must fail closed
+        agent = build_env(prof, fake_backend, pid=index)
+        assert "MIEN_SLACK_DEFAULT_TOKEN" not in agent.env
+        assert agent.env["MIEN_SLACK_DEFAULT_WORKSPACE"] == "team-a"
+        monkeypatch.delenv(marker)
 
 
 def test_aws_with_keys_sets_env(monkeypatch, tmp_path, fake_backend):
@@ -377,7 +407,7 @@ class TestPlanEnvMatchesBuildEnv:
          {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}),
         ({"slack": [SlackWorkspace(workspace="team-a", user_token_ref="slack-team-a-ref"),
                     SlackWorkspace(workspace="team-b", user_token_ref="slack-team-b-ref")]},
-         {"MIEN_SLACK_DEFAULT_TOKEN"}),
+         {"MIEN_SLACK_DEFAULT_WORKSPACE", "MIEN_SLACK_DEFAULT_TOKEN"}),
         # `build_env` keys its token map by workspace name, so two entries for
         # one workspace are one workspace and the default token *is* set. The
         # config parser refuses this shape; the parity still has to hold for a

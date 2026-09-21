@@ -21,7 +21,8 @@ def _no_capture_context(monkeypatch):
     exported in their shell would silently satisfy any test that means to
     exercise the no-profile path. Tests that need one set it explicitly.
     """
-    for marker in (*CAPTURE_MARKER_VARS, "MIEN_TOKEN", "MIEN_PROFILE"):
+    for marker in (*CAPTURE_MARKER_VARS, "MIEN_TOKEN", "MIEN_PROFILE",
+                   "MIEN_SLACK_LEGACY_DEFAULT_TOKEN"):
         monkeypatch.delenv(marker, raising=False)
 
 

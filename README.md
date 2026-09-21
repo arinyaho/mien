@@ -127,12 +127,24 @@ See `skills/mien/references/` for full docs.
 work — one identity, every provider
   slack      team-a
   ...
-  exports    GH_TOKEN (github) · MIEN_SLACK_TOKENS, MIEN_SLACK_DEFAULT_TOKEN (slack) · …
+  exports    GH_TOKEN (github) · MIEN_SLACK_TOKENS, MIEN_SLACK_DEFAULT_WORKSPACE (slack) · …
   unset      aws (AWS_PROFILE) — configured, but this variable is not set; an ambient value survives here
   no creds   oci (OCI_CLI_PROFILE, OCI_CLI_CONFIG_FILE) · notion (NOTION_TOKEN) — no credential on this profile; an ambient value survives here
 ```
 
-Knowing a profile *has* a slack credential is not the same as knowing it arrives as `$MIEN_SLACK_TOKENS`, and the only command that used to answer the second question — `mien exec <profile> -- env` — is a secret dump, which an agent sandbox blocks. So the answer was reachable only by reading mien's source. The `exports` row closes that; `--json` carries the same as an `env` array for machines.
+Knowing a profile *has* a slack credential is not the same as knowing it arrives as `$MIEN_SLACK_TOKENS`, and the only command that used to answer the second question — `mien exec <profile> -- env` — is a secret dump, which an agent sandbox blocks. So the answer was reachable only by reading mien's source. The `exports` row closes that; `--json` carries the same names plus a `value_type` such as `credential_file_path`, never a credential value.
+
+Slack tokens are always delivered in the mode-0600 JSON file named by `MIEN_SLACK_TOKENS`. A single-workspace profile also gets the non-secret workspace selector `MIEN_SLACK_DEFAULT_WORKSPACE`, so an agent can resolve the token only inside its child shell:
+
+```bash
+mien exec work -- sh <<'SH'
+TOKEN=$(jq -r --arg ws "$MIEN_SLACK_DEFAULT_WORKSPACE" '.[$ws]' "$MIEN_SLACK_TOKENS")
+printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
+  curl -sK - --url https://slack.com/api/auth.test
+SH
+```
+
+The raw `MIEN_SLACK_DEFAULT_TOKEN` variable is off by default. Existing human-terminal workflows can opt in temporarily with `MIEN_SLACK_LEGACY_DEFAULT_TOKEN=1`; the opt-in is ignored whenever `CODEX_THREAD_ID`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, or `MIEN_CAPTURED` is present.
 
 The `unset` and `no creds` rows are the half that bites: `exec` overlays the environment without scrubbing, so a variable mien does *not* set is one another identity's ambient value survives into. `no creds` is the worse case — a service this profile has no credential for at all, where *every* variable is inherited.
 
@@ -322,7 +334,7 @@ That is the difference from `project_env` below, which is for non-secret values 
 
 Switching profiles clears them. `mien use` unsets every variable mien manages before exporting the new profile's, and that list includes every `custom` name **any** profile defines — so moving from a profile with an `ANTHROPIC_API_KEY` to one without it clears the key instead of handing one identity's credential to another. (`mien exec`/`run` still layer over the ambient environment without scrubbing, as they always have.)
 
-A name has to be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) — `mien use` writes a script that gets sourced, and a name the shell won't take breaks the loader — and it may not be one of the nineteen variables mien already exports itself, whether for a built-in service or for its own bookkeeping (`MIEN_PROFILE`, `MIEN_EPHEMERAL_DIR`). Beyond those, one rule: a variable that the shell or mien *reads as an instruction* cannot be taken over to carry payload, because the scrub list is the union over *all* profiles — one such name in one profile makes every `mien use` and every `mien-unset`, in every shell, `unset` it, so a name in a profile you never activate reaches shells that have nothing to do with it. Two sets fall under that rule. Six are shell- or mien-critical — `PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG` — where stripping or overwriting the value breaks the shell, or mien's own loader, ephemeral store and config. Four are the markers mien reads to know an agent harness is recording this command — `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`, `MIEN_CAPTURED` — where *absence* is the permissive state, so the scrub's `unset` disarms `mien token`'s refusal to print a secret into a recorded transcript and [`mien exec`'s refusal to act as the wrong identity](#mien-exec-refuses-the-wrong-identity-for-this-place), and disarms them silently. The match is exact, so `MY_PATH` and `PATH_TO_KEY` are fine. All four refusals fire when you log in *and* when the config is parsed, so a hand-edit fails the same way; each error says what the name already means to mien or the shell, and a collision with a service's variable names the service it would have fought so you can reach for that service's own `--service` instead.
+A name has to be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) — `mien use` writes a script that gets sourced, and a name the shell won't take breaks the loader — and it may not be one of the twenty variables mien already exports itself, whether for a built-in service or for its own bookkeeping (`MIEN_PROFILE`, `MIEN_EPHEMERAL_DIR`). Beyond those, one rule: a variable that the shell or mien *reads as an instruction* cannot be taken over to carry payload, because the scrub list is the union over *all* profiles — one such name in one profile makes every `mien use` and every `mien-unset`, in every shell, `unset` it, so a name in a profile you never activate reaches shells that have nothing to do with it. Two sets fall under that rule. Six are shell- or mien-critical — `PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG` — where stripping or overwriting the value breaks the shell, or mien's own loader, ephemeral store and config. Four are the markers mien reads to know an agent harness is recording this command — `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`, `MIEN_CAPTURED` — where *absence* is the permissive state, so the scrub's `unset` disarms `mien token`'s refusal to print a secret into a recorded transcript and [`mien exec`'s refusal to act as the wrong identity](#mien-exec-refuses-the-wrong-identity-for-this-place), and disarms them silently. The match is exact, so `MY_PATH` and `PATH_TO_KEY` are fine. All four refusals fire when you log in *and* when the config is parsed, so a hand-edit fails the same way; each error says what the name already means to mien or the shell, and a collision with a service's variable names the service it would have fought so you can reach for that service's own `--service` instead.
 
 ## Ambient per-project env
 

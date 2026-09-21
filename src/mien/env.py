@@ -8,6 +8,7 @@ from pathlib import Path
 from mien.backends.base import SecretNotFound, SecretsBackend
 from mien.config import Profile
 from mien.ephemeral import EphemeralStore
+from mien.security import legacy_slack_token_enabled, register_secret
 
 
 @dataclass
@@ -39,6 +40,7 @@ BUILTIN_VARS: dict[str, str] = {
     "GOOGLE_APPLICATION_CREDENTIALS": "google",
     "GH_TOKEN": "github",
     "MIEN_SLACK_TOKENS": "slack",
+    "MIEN_SLACK_DEFAULT_WORKSPACE": "slack",
     "MIEN_SLACK_DEFAULT_TOKEN": "slack",
     "AWS_PROFILE": "aws",
     "AWS_DEFAULT_REGION": "aws",
@@ -70,11 +72,32 @@ class PlannedVar:
     service: str
     set: bool
     note: str = ""
+    # A classification, never the value. Machine consumers can distinguish a
+    # credential file path from a selector without dumping the environment.
+    value_type: str = "value"
     # False when the profile has no such service at all, as opposed to a
     # configured service whose variable is conditional. Both are ambient under
     # `exec`, but the remedies differ: add the credential, versus fill in the
     # field the service is missing.
     configured: bool = True
+
+    def __post_init__(self) -> None:
+        if self.value_type == "value":
+            _VAR_VALUE_TYPES = {
+                "GOOGLE_APPLICATION_CREDENTIALS": "credential_file_path",
+                "GH_TOKEN": "secret",
+                "MIEN_SLACK_TOKENS": "credential_file_path",
+                "MIEN_SLACK_DEFAULT_WORKSPACE": "selector",
+                "MIEN_SLACK_DEFAULT_TOKEN": "secret",
+                "AWS_ACCESS_KEY_ID": "secret",
+                "AWS_SECRET_ACCESS_KEY": "secret",
+                "ATLASSIAN_API_TOKEN": "secret",
+                "NOTION_TOKEN": "secret",
+            }
+            if self.var in _VAR_VALUE_TYPES:
+                object.__setattr__(self, "value_type", _VAR_VALUE_TYPES[self.var])
+            elif self.service == "custom":
+                object.__setattr__(self, "value_type", "secret")
 
 
 def plan_env(profile: Profile) -> list[PlannedVar]:
@@ -128,10 +151,20 @@ def plan_env(profile: Profile) -> list[PlannedVar]:
         one = len({w.workspace for w in profile.slack}) == 1
         plan += [
             PlannedVar("MIEN_SLACK_TOKENS", "slack", True,
-                       "path to a 0600 JSON map of workspace → token"),
-            PlannedVar("MIEN_SLACK_DEFAULT_TOKEN", "slack", one,
-                       "" if one else "only with exactly one workspace; this profile "
-                                      f"has {len(profile.slack)}"),
+                       "path to a 0600 JSON map of workspace → token",
+                       value_type="credential_file_path"),
+            PlannedVar("MIEN_SLACK_DEFAULT_WORKSPACE", "slack", one,
+                       "a non-secret workspace name" if one else
+                       "only with exactly one workspace; this profile "
+                       f"has {len(profile.slack)}", value_type="selector"),
+            PlannedVar(
+                "MIEN_SLACK_DEFAULT_TOKEN", "slack",
+                one and legacy_slack_token_enabled(),
+                "legacy raw-token compatibility, enabled only by explicit "
+                "opt-in in a non-agent terminal" if one else
+                "legacy raw-token compatibility requires exactly one workspace",
+                value_type="secret",
+            ),
         ]
     if aws:
         keys = bool(aws.access_key_id_ref and aws.secret_access_key_ref)
@@ -194,6 +227,8 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
         if g.refresh_token_ref and g.oauth_client_secret_ref:
             refresh = backend.get(g.refresh_token_ref).decode("utf-8").strip()
             client_secret = backend.get(g.oauth_client_secret_ref).decode("utf-8").strip()
+            register_secret(refresh)
+            register_secret(client_secret)
             adc_payload = json.dumps(
                 {
                     "type": "authorized_user",
@@ -210,10 +245,12 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
         gh = profile.github
         if gh.token_ref:
             token = backend.get(gh.token_ref).decode("utf-8").strip()
+            register_secret(token)
             bundle.env["GH_TOKEN"] = token
         ssh_path: str | None = None
         if gh.ssh_key_ref:
             key_data = backend.get(gh.ssh_key_ref)
+            register_secret(key_data)
             ephemeral = store.write(profile=profile.name, kind="ssh_key", data=key_data)
             bundle.ephemeral_files.append(ephemeral)
             ssh_path = str(ephemeral)
@@ -227,6 +264,8 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
             ws.workspace: backend.get(ws.user_token_ref).decode("utf-8").strip()
             for ws in profile.slack
         }
+        for token in mapping.values():
+            register_secret(token)
         slack_path = store.write(
             profile=profile.name, kind="slack",
             data=json.dumps(mapping).encode("utf-8"),
@@ -234,14 +273,18 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
         bundle.env["MIEN_SLACK_TOKENS"] = str(slack_path)
         bundle.ephemeral_files.append(slack_path)
         if len(mapping) == 1:
-            (only,) = mapping.values()
-            bundle.env["MIEN_SLACK_DEFAULT_TOKEN"] = only
+            (workspace, only) = next(iter(mapping.items()))
+            bundle.env["MIEN_SLACK_DEFAULT_WORKSPACE"] = workspace
+            if legacy_slack_token_enabled():
+                bundle.env["MIEN_SLACK_DEFAULT_TOKEN"] = only
 
     if profile.aws:
         aws = profile.aws
         if aws.access_key_id_ref and aws.secret_access_key_ref:
             key_id = backend.get(aws.access_key_id_ref).decode("utf-8").strip()
             secret = backend.get(aws.secret_access_key_ref).decode("utf-8").strip()
+            register_secret(key_id)
+            register_secret(secret)
             bundle.env["AWS_ACCESS_KEY_ID"] = key_id
             bundle.env["AWS_SECRET_ACCESS_KEY"] = secret
         if aws.profile:
@@ -259,12 +302,14 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
     if profile.atlassian:
         atl = profile.atlassian
         token = backend.get(atl.api_token_ref).decode("utf-8").strip()
+        register_secret(token)
         bundle.env["ATLASSIAN_EMAIL"] = atl.email
         bundle.env["ATLASSIAN_API_TOKEN"] = token
         bundle.env["ATLASSIAN_BASE_URL"] = atl.base_url
 
     if profile.notion:
         token = backend.get(profile.notion.api_token_ref).decode("utf-8").strip()
+        register_secret(token)
         bundle.env["NOTION_TOKEN"] = token
 
     # The user's own credentials, each delivered under the variable name they
@@ -274,7 +319,9 @@ def build_env(profile: Profile, backend: SecretsBackend, *, pid: int | None = No
     # rather than resolved by statement order.
     for var, ref in profile.custom.items():
         try:
-            bundle.env[var] = backend.get(ref).decode("utf-8").strip()
+            value = backend.get(ref).decode("utf-8").strip()
+            register_secret(value)
+            bundle.env[var] = value
         except SecretNotFound as exc:
             # A backend raises with the ref alone, which is the one fact a person
             # cannot act on: it says a secret is missing, not that THIS profile's

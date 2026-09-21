@@ -252,11 +252,11 @@ def test_the_packaged_schema_reference_lists_exactly_the_taken_names():
     from mien.shell import BUILTIN_VARS
     doc = (Path(__file__).resolve().parent.parent
            / "plugins/mien/skills/mien/references/schema.md").read_text()
-    para = next(line for line in doc.splitlines() if "nineteen taken names" in line)
+    para = next(line for line in doc.splitlines() if "twenty taken names" in line)
     # The sentence names every taken variable, and nothing that is not one.
     assert set(re.findall(r"`([A-Z_][A-Z0-9_]*)`", para)) == set(BUILTIN_VARS)
     # ...the count it claims is the real one...
-    assert len(BUILTIN_VARS) == 19
+    assert len(BUILTIN_VARS) == 20
     # ...and each name sits in the group labelled with the service the collision
     # error attributes it to, so the doc attributes rather than merely lists.
     attributed = {}

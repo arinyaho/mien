@@ -97,6 +97,13 @@ mien exec personal -- sh -c 'curl -s -u "$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN" 
   "$ATLASSIAN_BASE_URL/rest/api/3/issue/PROJ-123"'   # Atlassian is Basic, not Bearer
 mien exec personal -- sh -c 'curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
   "https://gmail.googleapis.com/gmail/v1/users/me/profile"'
+
+# Slack stays file-only in agent harnesses; the selector is not a credential.
+mien exec personal -- sh <<'SH'
+TOKEN=$(jq -r --arg ws "$MIEN_SLACK_DEFAULT_WORKSPACE" '.[$ws]' "$MIEN_SLACK_TOKENS")
+printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
+  curl -sK - --url https://slack.com/api/auth.test
+SH
 ```
 
 Google is the one service with no bare-token variable — `mien exec` gives it
@@ -113,7 +120,9 @@ invocation. See the skill's *Activation pattern* section.
 `mien whoami` prints what the config says a profile is — fast, offline, no network — as a
 card of the whole bundled identity: every provider that profile is (Google, GitHub, Slack,
 AWS, OCI, Atlassian, Notion), plus the remotes and directories it owns, in one view. It
-shows names and selectors only, never a token. Add `--json` for the machine-readable form.
+shows names and selectors only, never a token. Add `--json` for the machine-readable form;
+its `env` entries include variable names and `value_type` classifications such as
+`credential_file_path`, never environment values.
 `mien whoami --live` goes further: it asks GitHub, AWS, and Google who the profile
 *actually* authenticates as and compares that to the config.
 

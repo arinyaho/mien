@@ -20,6 +20,7 @@ from enum import Enum
 import httpx
 
 from mien.oauth import exchange_refresh_token
+from mien.security import redact, register_secret
 
 _PROBE_TIMEOUT = 15
 
@@ -71,6 +72,7 @@ _NETWORK_ERROR_MARKERS = (
 
 
 def _classify_cli_failure(service: str, stderr: str) -> ProbeResult:
+    stderr = redact(stderr)
     lowered = stderr.lower()
     if any(m in lowered for m in _NETWORK_ERROR_MARKERS):
         return ProbeResult(service, None, None, Status.UNREACHABLE, stderr)
@@ -95,7 +97,7 @@ def _run_probe(service: str, cmd: list[str], env: dict[str, str]) -> tuple[str |
         # (PermissionError), too many open files, etc. Not installed-enough to
         # probe, so treat it as the tool being unavailable rather than crash.
         return None, ProbeResult(service, None, None, Status.UNAVAILABLE,
-                                 f"could not run {cmd[0]}: {e}")
+                                 redact(f"could not run {cmd[0]}: {e}"))
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", "replace").strip()
         return None, _classify_cli_failure(service, stderr)
@@ -114,7 +116,7 @@ def run_probe_safely(service: str, fn) -> ProbeResult:
         return fn()
     except Exception as e:  # noqa: BLE001 — a probe must not propagate
         return ProbeResult(service, None, None, Status.UNREACHABLE,
-                           f"probe error: {e}")
+                           redact(f"probe error: {e}"))
 
 
 def probe_github(configured_username: str | None, env: dict[str, str]) -> ProbeResult:
@@ -161,6 +163,8 @@ def probe_google(
     client_secret: str,
     refresh_token: str,
 ) -> ProbeResult:
+    register_secret(client_secret)
+    register_secret(refresh_token)
     # exchange_refresh_token and _userinfo_email both use httpx: a 4xx (a revoked
     # or expired refresh token yields 400 invalid_grant) is a dead credential;
     # any other transport error is the provider being unreachable.
@@ -170,6 +174,7 @@ def probe_google(
             client_secret=client_secret,
             refresh_token=refresh_token,
         )
+        register_secret(access)
         live = _userinfo_email(access)
     except httpx.HTTPStatusError as e:
         code = e.response.status_code
@@ -180,7 +185,8 @@ def probe_google(
         status = Status.UNAUTHORIZED if dead else Status.UNREACHABLE
         return ProbeResult("google", configured_email, None, status, f"HTTP {code}")
     except httpx.RequestError as e:
-        return ProbeResult("google", configured_email, None, Status.UNREACHABLE, str(e))
+        return ProbeResult("google", configured_email, None, Status.UNREACHABLE,
+                           redact(e))
     except (_NoEmail, ValueError, KeyError, TypeError, AttributeError) as e:
         # A malformed provider response: non-JSON body (ValueError from .json()),
         # a JSON non-object like `null` (TypeError on [], AttributeError on
@@ -189,5 +195,5 @@ def probe_google(
         # unreachable-for-our-purpose, never a crash — the never-raises contract
         # is unconditional.
         return ProbeResult("google", configured_email, None, Status.UNREACHABLE,
-                           f"unexpected provider response: {e}")
+                           redact(f"unexpected provider response: {e}"))
     return _compare("google", configured_email, live)

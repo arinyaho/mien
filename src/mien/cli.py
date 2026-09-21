@@ -57,9 +57,9 @@ from mien.resolve import (AmbiguousScope, claimed_profile, git_author_email,
                           resolve_remote_profile)
 from mien.verify import Status, probe_aws, probe_github, probe_google, run_probe_safely
 from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN, render_name
-from mien.shell import (BUILTIN_VARS, CAPTURE_MARKER_VARS, MIEN_INTERNAL_OWNER,
-                        NON_SECRET_VARS, custom_vars, emit_unset, emit_use,
-                        render_shell_init)
+from mien.security import capture_context, redact, redact_bytes, register_secret, legacy_slack_token_enabled
+from mien.shell import (BUILTIN_VARS, MIEN_INTERNAL_OWNER, NON_SECRET_VARS,
+                        custom_vars, emit_unset, emit_use, render_shell_init)
 from mien.statusline import guard_reason, render_segment
 
 
@@ -171,13 +171,21 @@ class MienGroup(click.Group):
     def invoke(self, ctx: click.Context):
         try:
             return super().invoke(ctx)
-        except click.ClickException:
+        except click.ClickException as exc:
+            # Click renders this without a traceback, but its message can still
+            # contain a backend exception, command argument, or credential file
+            # value. Sanitize even errors commands raised deliberately.
+            exc.message = redact(exc.message)
+            raise
+        except click.Abort:
             raise
         except Exception as exc:
             msg = _friendly_backend_message(exc)
-            if msg:
-                raise click.ClickException(msg) from exc
-            raise
+            if not msg:
+                msg = f"unexpected internal error: {exc}"
+            # Never re-raise an unclassified exception into a harness traceback:
+            # exception args are a common place for file names and HTTP headers.
+            raise click.ClickException(redact(msg)) from None
 
 
 @click.group(cls=MienGroup)
@@ -220,18 +228,24 @@ def _read_secret(label: str, *, secret_cmd: str | None, from_stdin: bool) -> str
         secret = out.strip()
         if not secret:
             raise click.ClickException("--secret-cmd produced empty output")
+        register_secret(secret)
         return secret
     if from_stdin:
         secret = sys.stdin.read().strip()
         if not secret:
             raise click.ClickException("--token-stdin set but stdin was empty")
+        register_secret(secret)
         return secret
-    return click.prompt(label, hide_input=True)
+    secret = click.prompt(label, hide_input=True)
+    register_secret(secret)
+    return secret
 
 
 def _read_ssh_key(path: Path) -> bytes:
     try:
-        return path.read_bytes()
+        content = path.read_bytes()
+        register_secret(content)
+        return content
     except FileNotFoundError:
         raise click.ClickException(
             f"SSH key not found at {path}.\n"
@@ -384,7 +398,7 @@ def init_cmd(
             remote = pull_manifest(backend)
         except Exception as exc:
             remote = None
-            click.echo(f"(manifest check skipped: {exc})", err=True)
+            click.echo(redact(f"(manifest check skipped: {exc})"), err=True)
         if remote and remote.profiles:
             names = ", ".join(remote.profiles)
             do_import = yes or click.confirm(
@@ -429,7 +443,7 @@ def _check_adc_quota_project(expected: str | None) -> None:
     try:
         adc = json.loads(adc_path.read_text())
     except (OSError, json.JSONDecodeError) as e:
-        click.echo(f"ADC: unreadable ({e})", err=True)
+        click.echo(redact(f"ADC: unreadable ({e})"), err=True)
         return
     actual = adc.get("quota_project_id")
     if not actual:
@@ -458,11 +472,10 @@ def _set_adc_quota_project(project: str) -> None:
         )
         click.echo(f"Set ADC quota project to {project}.")
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        click.echo(
+        click.echo(redact(
             f"warning: could not set ADC quota project ({exc}). "
-            f"Run manually: gcloud auth application-default set-quota-project {project}",
-            err=True,
-        )
+            f"Run manually: gcloud auth application-default set-quota-project {project}"
+        ), err=True)
 
 
 @main.command("shell-init")
@@ -507,7 +520,7 @@ def _profiles_for_vars(consequence: str) -> dict[str, Profile]:
     try:
         cfg = load_config()
     except ConfigError as exc:
-        click.echo(f"mien: {consequence} — config unreadable: {exc}", err=True)
+        click.echo(redact(f"mien: {consequence} — config unreadable: {exc}"), err=True)
         return {}
     return cfg.profiles if cfg else {}
 
@@ -712,7 +725,8 @@ def whoami_cmd(profile: str | None, live: bool, as_json: bool) -> None:
                 # the consumer is an agent parsing the shape SKILL.md documents,
                 # and a key that vanishes on some entries is a KeyError there.
                 {"var": v.var, "service": v.service, "set": v.set,
-                 "configured": v.configured, "note": v.note}
+                 "configured": v.configured, "value_type": v.value_type,
+                 "note": v.note}
                 for v in plan_env(prof)
             ],
             "owns_remotes": list(prof.owns_remotes),
@@ -836,11 +850,10 @@ def _save_and_sync(cfg: Config, backend) -> None:
         try:
             push_manifest(cfg, backend)
         except Exception as exc:
-            click.echo(
+            click.echo(redact(
                 f"warning: could not sync config manifest ({exc}). "
-                f"Run `mien push` later.",
-                err=True,
-            )
+                f"Run `mien push` later."
+            ), err=True)
 
 
 def _reject_reserved_secret_name(profile_name: str, secret_naming: SecretNaming) -> None:
@@ -1048,6 +1061,7 @@ def login_cmd(
                 client_secret=client_secret,
                 scopes=GOOGLE_DEFAULT_SCOPES,
             )
+        register_secret(refresh)
         oauth_secret_ref = backend.put(
             render_name(cfg.secret_naming.default, profile=profile_name, service="google", kind="oauth_client_secret"),
             client_secret.encode("utf-8"),
@@ -1081,6 +1095,7 @@ def login_cmd(
             aws.profile = aws_profile
         if access_key_id:
             key_id = access_key_id
+            register_secret(key_id)
             secret = _read_secret("AWS secret access key", secret_cmd=secret_cmd, from_stdin=token_stdin)
             ref_id = backend.put(
                 render_name(cfg.secret_naming.default, profile=profile_name, service="aws", kind="access_key_id"),
@@ -1104,6 +1119,7 @@ def login_cmd(
                 aws.region = click.prompt("Default region (optional, blank to skip)", default="", show_default=False) or None
             else:
                 key_id = click.prompt("AWS access key ID")
+                register_secret(key_id)
                 secret = _read_secret("AWS secret access key", secret_cmd=secret_cmd, from_stdin=False)
                 aws.region = click.prompt("Default region (optional, blank to skip)", default="", show_default=False) or None
                 ref_id = backend.put(
@@ -1411,7 +1427,48 @@ def _run_as_profile(cfg: Config, prof: Profile, argv: tuple[str, ...]) -> None:
     try:
         bundle = build_env(prof, backend, pid=store.pid)
         env = {**os.environ, **bundle.env}
-        rc = subprocess.call(list(argv), env=env)
+        if not legacy_slack_token_enabled():
+            env.pop("MIEN_SLACK_DEFAULT_TOKEN", None)
+        secret_env = {
+            "GH_TOKEN", "MIEN_SLACK_DEFAULT_TOKEN", "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY", "ATLASSIAN_API_TOKEN", "NOTION_TOKEN",
+        }
+        carries_secret = bool(
+            bundle.ephemeral_files
+            or secret_env.intersection(bundle.env)
+            or set(prof.custom).intersection(bundle.env)
+        )
+        if capture_context() is not None and carries_secret:
+            # Agent harnesses persist tool output. Capture both channels so a
+            # child traceback or diagnostic cannot replay a credential it read
+            # from one of mien's 0600 files. A human terminal keeps the normal
+            # inherited streams and interactivity.
+            import threading
+            proc = subprocess.Popen(
+                list(argv), env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            def _stream(pipe_in, pipe_out):
+                try:
+                    binary_out = getattr(pipe_out, "buffer", pipe_out)
+                    for line in pipe_in:
+                        safe = redact_bytes(line)
+                        if binary_out is pipe_out:
+                            pipe_out.write(safe.decode("utf-8", errors="replace"))
+                        else:
+                            binary_out.write(safe)
+                        pipe_out.flush()
+                except Exception:
+                    pass
+            t1 = threading.Thread(target=_stream, args=(proc.stdout, sys.stdout))
+            t2 = threading.Thread(target=_stream, args=(proc.stderr, sys.stderr))
+            t1.start()
+            t2.start()
+            rc = proc.wait()
+            t1.join()
+            t2.join()
+        else:
+            rc = subprocess.call(list(argv), env=env)
     finally:
         store.cleanup()
     sys.exit(rc)
@@ -1955,21 +2012,6 @@ _HTTP_HINT_FOR = {
 }
 
 
-def capture_context() -> str | None:
-    """The harness marker suggesting this command's stdout is being recorded.
-
-    Presence-gated: any one marker set means "an agent is driving". The names come
-    from `mien.shell.CAPTURE_MARKER_VARS` rather than a tuple of their own, and
-    that is the point — the same map is what `check_custom_var_name` refuses as a
-    `custom` credential name, so a marker cannot be detected here while the scrub
-    is still free to `unset` it.
-    """
-    for marker in CAPTURE_MARKER_VARS:
-        if os.environ.get(marker, "").strip():
-            return marker
-    return None
-
-
 @main.command("guard")
 @click.option("--force", "-f", is_flag=True, help="Skip the check and exit 0.")
 def guard_cmd(force: bool) -> None:
@@ -2019,8 +2061,8 @@ def guard_cmd(force: bool) -> None:
     except ConfigError as exc:
         # Still fail open — a broken config must not wedge your commits — but a
         # guard that has silently stopped guarding is worse than one that says so.
-        click.echo(
-            f"mien: guard is NOT enforcing — config unreadable: {exc}", err=True)
+        click.echo(redact(
+            f"mien: guard is NOT enforcing — config unreadable: {exc}"), err=True)
         return
     except Exception:
         return  # fail open: never wedge an action because guard itself broke.
@@ -2061,9 +2103,11 @@ _NO_TOKEN_SUBCOMMAND = {
         "slack has no single token to print: a profile may hold several "
         "workspaces, and the credential arrives as a workspace \u2192 token map.\n"
         "  Read it in the child shell, so no value reaches your own:\n"
-        "    mien exec <profile> -- sh -c "
-        "'jq -r --arg w <workspace> \".[$w]\" \"$MIEN_SLACK_TOKENS\"'\n"
-        "  With exactly one workspace, $MIEN_SLACK_DEFAULT_TOKEN is also set.\n"
+        "    TOKEN=$(jq -r --arg ws \"$MIEN_SLACK_DEFAULT_WORKSPACE\" "
+        "'.[$ws]' \"$MIEN_SLACK_TOKENS\")\n"
+        "  Run that inside `mien exec <profile> -- sh`; the default workspace "
+        "is a non-secret selector. Raw token variables are not exported by "
+        "default and are never exported to an agent harness.\n"
         "  `mien whoami <profile>` lists every variable a profile exports."
     ),
     "aws": (
@@ -2181,14 +2225,19 @@ def token_cmd(service: str, profile: str | None, force: bool) -> None:
     if service == "google":
         client_secret = backend.get(identity.oauth_client_secret_ref).decode("utf-8")
         refresh = backend.get(identity.refresh_token_ref).decode("utf-8")
+        register_secret(client_secret)
+        register_secret(refresh)
         access = exchange_refresh_token(
             client_id=identity.oauth_client_id,
             client_secret=client_secret,
             refresh_token=refresh,
         )
+        register_secret(access)
         click.echo(access)
     else:
-        click.echo(backend.get(identity.api_token_ref).decode("utf-8").strip())
+        token = backend.get(identity.api_token_ref).decode("utf-8").strip()
+        register_secret(token)
+        click.echo(token)
 
 
 @main.command("logout")
@@ -2345,9 +2394,9 @@ def doctor_cmd(gc: bool) -> None:
     click.echo(f"config:    {config_path()}")
     click.echo(f"backend:   {cfg.secrets_backend.type}")
     for k, v in cfg.secrets_backend.options.items():
-        click.echo(f"             {k}={v}")
+        click.echo(redact(f"             {k}={v}"))
     for k, v in (cfg.bootstrap or {}).items():
-        click.echo(f"bootstrap: {k}={v}")
+        click.echo(redact(f"bootstrap: {k}={v}"))
     names = ", ".join(cfg.profiles) or "(none)"
     click.echo(f"profiles:  {len(cfg.profiles)} [{names}]")
 
@@ -2397,7 +2446,8 @@ def preflight_cmd(backend: str, project: str | None, account: str | None, as_jso
             if r.returncode == 0:
                 add(f"project {project!r} accessible", True)
             else:
-                add(f"project {project!r} accessible", False, r.stderr.strip().splitlines()[-1] if r.stderr else "",
+                add(f"project {project!r} accessible", False,
+                    redact(r.stderr.strip().splitlines()[-1]) if r.stderr else "",
                     f"gcloud projects list --account={account or '<email>'}  # find the right project ID")
 
             r = subprocess.run(
@@ -2421,7 +2471,7 @@ def preflight_cmd(backend: str, project: str | None, account: str | None, as_jso
                 qp = adc.get("quota_project_id")
                 add("ADC present", True, f"quota_project_id={qp or '(unset)'}")
             except (OSError, json.JSONDecodeError) as e:
-                add("ADC present", False, str(e),
+                add("ADC present", False, redact(e),
                     f"gcloud auth application-default login --account={account or '<email>'}")
         else:
             add("ADC present", False, "no application_default_credentials.json",
@@ -2434,7 +2484,7 @@ def preflight_cmd(backend: str, project: str | None, account: str | None, as_jso
             load_backend(BackendConfig(type="macos_keychain", options={})).health_check()
             add("macOS Keychain", True)
         except Exception as e:
-            add("macOS Keychain", False, str(e),
+            add("macOS Keychain", False, redact(e),
                 "macOS only — this backend isn't supported on this OS")
 
     if as_json:

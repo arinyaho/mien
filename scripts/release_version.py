@@ -31,13 +31,21 @@ def main() -> None:
     version_file = root / "VERSION"
     claude_manifest = root / "plugins/mien/.claude-plugin/plugin.json"
     codex_manifest = root / "plugins/mien/.codex-plugin/plugin.json"
+    copilot_manifest = root / "plugins/mien/plugin.json"
     pyproject = root / "pyproject.toml"
     skill = root / "plugins/mien/skills/mien/SKILL.md"
-    files = [version_file, claude_manifest, codex_manifest, pyproject, skill]
+    files = [
+        version_file,
+        claude_manifest,
+        codex_manifest,
+        copilot_manifest,
+        pyproject,
+        skill,
+    ]
 
     # Read and validate every target before changing any one of them.
     contents = {file: file.read_text(encoding="utf-8") for file in files}
-    for manifest in (claude_manifest, codex_manifest):
+    for manifest in (claude_manifest, codex_manifest, copilot_manifest):
         json.loads(contents[manifest])
     for file in files:
         if not os.access(file, os.W_OK):
@@ -52,6 +60,12 @@ def main() -> None:
         ),
         codex_manifest: replace_once(
             contents[codex_manifest],
+            re.compile(r'("version"\s*:\s*")(?:(?:\\.)|[^"\\])*(")'),
+            version,
+            "JSON",
+        ),
+        copilot_manifest: replace_once(
+            contents[copilot_manifest],
             re.compile(r'("version"\s*:\s*")(?:(?:\\.)|[^"\\])*(")'),
             version,
             "JSON",

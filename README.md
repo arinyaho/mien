@@ -3,6 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)
+![GitHub Copilot](https://img.shields.io/badge/GitHub%20Copilot-agent%20plugin-24292F)
 
 Multi-identity credential router for Google, GitHub, and Slack — designed for developers juggling multiple accounts (personal + work) across services.
 
@@ -47,7 +48,7 @@ cd ~/projects/mien && uv tool install --editable .
 
 ### As an agent skill
 
-`mien` ships a SKILL.md that teaches AI agents (Claude Code, Codex, Hermes Agent) when and how to invoke the CLI on your behalf. The skill assumes the `mien` binary is already on `PATH` — install the CLI first (above), then add the skill:
+`mien` ships a SKILL.md that teaches AI agents (Claude Code, Codex, GitHub Copilot Chat, Hermes Agent) when and how to invoke the CLI on your behalf. The skill assumes the `mien` binary is already on `PATH` — install the CLI first (above), then add the skill:
 
 > **One rule worth knowing yourself:** `mien` routes the environment-variable plane only. Your agent's built-in service connectors (Atlassian, Slack, Notion, Google) hold one fixed account each and ignore a profile switch entirely — so a session told to use `work` still reads Jira as whoever the connector authenticated as, silently. For any service a profile has credentials for, the agent should call the REST API under `mien exec <profile> -- `. The skill says so as its first rule; see [SECURITY.md](SECURITY.md#protection-goals-and-what-is-not-protected).
 
@@ -66,6 +67,19 @@ codex plugin add mien@arinyaho                           # install the plugin
 ```
 
 Update the Codex plugin: `codex plugin marketplace upgrade arinyaho` then re-run `codex plugin add mien@arinyaho`. Uninstall: `codex plugin remove mien@arinyaho` (and, optionally, `codex plugin marketplace remove arinyaho`).
+
+**GitHub Copilot Chat:**
+
+Enable Agent Plugins and add the mien marketplace in VS Code's `settings.json`:
+
+```json
+{
+  "chat.plugins.enabled": true,
+  "chat.plugins.marketplaces": ["arinyaho/mien"]
+}
+```
+
+Open the Extensions view, search `@agentPlugins mien`, and select **Install**. VS Code installs the shared Agent Skill directly; Claude CLI is not required.
 
 **Hermes Agent:**
 
@@ -144,7 +158,7 @@ printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
 SH
 ```
 
-The raw `MIEN_SLACK_DEFAULT_TOKEN` variable is off by default. Existing human-terminal workflows can opt in temporarily with `MIEN_SLACK_LEGACY_DEFAULT_TOKEN=1`; the opt-in is ignored whenever `CODEX_THREAD_ID`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, or `MIEN_CAPTURED` is present.
+The raw `MIEN_SLACK_DEFAULT_TOKEN` variable is off by default. Existing human-terminal workflows can opt in temporarily with `MIEN_SLACK_LEGACY_DEFAULT_TOKEN=1`; the opt-in is ignored whenever `CODEX_THREAD_ID`, `COPILOT_AGENT`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, or `MIEN_CAPTURED` is present.
 
 The `unset` and `no creds` rows are the half that bites: `exec` overlays the environment without scrubbing, so a variable mien does *not* set is one another identity's ambient value survives into. `no creds` is the worse case — a service this profile has no credential for at all, where *every* variable is inherited.
 
@@ -274,7 +288,7 @@ Error: refusing to hand over credentials: this call asked for profile 'personal'
 
 An **approved `.mien` outranks the repository**: in a workspace you bound with `mien claim`/`mien allow`, that profile is the claim, so `exec` allows it even when `origin` belongs to someone else — and refuses the *other* profile against the declaration. That keeps the gate agreeing with `which`, `run` and the status line about the same directory. An unapproved `.mien` counts for nothing here, exactly as it counts for nothing when choosing an identity that acts.
 
-A person at a terminal never meets this check at all: it fires only under the same agent-harness detection `mien token` uses (`$CLAUDECODE`, `$CLAUDE_CODE_ENTRYPOINT`, `$CODEX_THREAD_ID`, or `MIEN_CAPTURED=1` for a harness mien does not recognize). There is deliberately **no `--force`** — an override an agent can reach for is one it will reach for, and the refusal is the entire control.
+A person at a terminal never meets this check at all: it fires only under the same agent-harness detection `mien token` uses (`$CLAUDECODE`, `$CLAUDE_CODE_ENTRYPOINT`, `$CODEX_THREAD_ID`, `$COPILOT_AGENT`, or `MIEN_CAPTURED=1` for a harness mien does not recognize). There is deliberately **no `--force`** — an override an agent can reach for is one it will reach for, and the refusal is the entire control.
 
 Like `guard`, it fails open on every uncertainty: no config, nothing claiming this place, an ambiguous claim, no repository or no remote, or any internal error all allow the handover. For a false refusal you need to get past while you fix the underlying config, set `MIEN_EXEC=off` (also `0`, `false`, `no`) — the same convention as `MIEN_GUARD`. It is documented here and not in the error text, because the human who needs it reads the docs and the agent that must not have it reads the error.
 
@@ -334,7 +348,7 @@ That is the difference from `project_env` below, which is for non-secret values 
 
 Switching profiles clears them. `mien use` unsets every variable mien manages before exporting the new profile's, and that list includes every `custom` name **any** profile defines — so moving from a profile with an `ANTHROPIC_API_KEY` to one without it clears the key instead of handing one identity's credential to another. (`mien exec`/`run` still layer over the ambient environment without scrubbing, as they always have.)
 
-A name has to be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) — `mien use` writes a script that gets sourced, and a name the shell won't take breaks the loader — and it may not be one of the twenty variables mien already exports itself, whether for a built-in service or for its own bookkeeping (`MIEN_PROFILE`, `MIEN_EPHEMERAL_DIR`). Beyond those, one rule: a variable that the shell or mien *reads as an instruction* cannot be taken over to carry payload, because the scrub list is the union over *all* profiles — one such name in one profile makes every `mien use` and every `mien-unset`, in every shell, `unset` it, so a name in a profile you never activate reaches shells that have nothing to do with it. Two sets fall under that rule. Six are shell- or mien-critical — `PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG` — where stripping or overwriting the value breaks the shell, or mien's own loader, ephemeral store and config. Four are the markers mien reads to know an agent harness is recording this command — `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`, `MIEN_CAPTURED` — where *absence* is the permissive state, so the scrub's `unset` disarms `mien token`'s refusal to print a secret into a recorded transcript and [`mien exec`'s refusal to act as the wrong identity](#mien-exec-refuses-the-wrong-identity-for-this-place), and disarms them silently. The match is exact, so `MY_PATH` and `PATH_TO_KEY` are fine. All four refusals fire when you log in *and* when the config is parsed, so a hand-edit fails the same way; each error says what the name already means to mien or the shell, and a collision with a service's variable names the service it would have fought so you can reach for that service's own `--service` instead.
+A name has to be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`) — `mien use` writes a script that gets sourced, and a name the shell won't take breaks the loader — and it may not be one of the twenty variables mien already exports itself, whether for a built-in service or for its own bookkeeping (`MIEN_PROFILE`, `MIEN_EPHEMERAL_DIR`). Beyond those, one rule: a variable that the shell or mien *reads as an instruction* cannot be taken over to carry payload, because the scrub list is the union over *all* profiles — one such name in one profile makes every `mien use` and every `mien-unset`, in every shell, `unset` it, so a name in a profile you never activate reaches shells that have nothing to do with it. Two sets fall under that rule. Seven are shell- or mien-critical — `PATH`, `HOME`, `IFS`, `PS1`, `TMPDIR`, `MIEN_CONFIG`, `MIEN_SLACK_LEGACY_DEFAULT_TOKEN` — where stripping or overwriting the value breaks the shell, mien's own loader, ephemeral store and config, or a security opt-in. Five are the markers mien reads to know an agent harness is recording this command — `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`, `COPILOT_AGENT`, `MIEN_CAPTURED` — where *absence* is the permissive state, so the scrub's `unset` disarms `mien token`'s refusal to print a secret into a recorded transcript and [`mien exec`'s refusal to act as the wrong identity](#mien-exec-refuses-the-wrong-identity-for-this-place), and disarms them silently. The match is exact, so `MY_PATH` and `PATH_TO_KEY` are fine. All four refusals fire when you log in *and* when the config is parsed, so a hand-edit fails the same way; each error says what the name already means to mien or the shell, and a collision with a service's variable names the service it would have fought so you can reach for that service's own `--service` instead.
 
 ## Ambient per-project env
 

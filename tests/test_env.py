@@ -159,6 +159,8 @@ def test_slack_writes_workspace_map(monkeypatch, tmp_path, fake_backend):
 def test_slack_legacy_raw_token_requires_explicit_non_agent_opt_in(
     monkeypatch, tmp_path, fake_backend
 ):
+    from mien.security import CAPTURE_MARKER_VARS
+
     monkeypatch.setenv("TMPDIR", str(tmp_path))
     monkeypatch.setenv("MIEN_SLACK_LEGACY_DEFAULT_TOKEN", "1")
     prof = Profile(
@@ -170,10 +172,7 @@ def test_slack_legacy_raw_token_requires_explicit_non_agent_opt_in(
     assert terminal.env["MIEN_SLACK_DEFAULT_TOKEN"] == "xoxp-aaa"
     assert terminal.env["MIEN_SLACK_DEFAULT_WORKSPACE"] == "team-a"
 
-    for index, marker in enumerate(
-        ("CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MIEN_CAPTURED"),
-        start=557,
-    ):
+    for index, marker in enumerate(CAPTURE_MARKER_VARS, start=557):
         monkeypatch.setenv(marker, "")  # presence alone must fail closed
         agent = build_env(prof, fake_backend, pid=index)
         assert "MIEN_SLACK_DEFAULT_TOKEN" not in agent.env

@@ -70,7 +70,8 @@ def test_status_prints_a_value_only_for_the_pinned_non_secret_vars(
     assert all(f"  {v}=<set>" in out for v in masked)
 
 
-def test_init_writes_keychain_skeleton(runner, mien_cfg):
+def test_init_writes_keychain_skeleton(runner, mien_cfg, mocker):
+    mocker.patch("mien.cli.load_backend").return_value.health_check.return_value = None
     result = runner.invoke(main, ["init"], input="2\nmien-\n")
     assert result.exit_code == 0, result.output
     payload = json.loads(mien_cfg.read_text())
@@ -1787,6 +1788,13 @@ def test_token_refuses_in_a_codex_session(runner, mien_cfg, mocker):
     assert "my-secret-notion-token" not in result.output
     assert "mien exec" in result.output
     assert "CODEX_THREAD_ID" in result.output
+
+
+def test_capture_context_detects_a_copilot_session(monkeypatch):
+    from mien.security import capture_context
+
+    monkeypatch.setenv("COPILOT_AGENT", "1")
+    assert capture_context() == "COPILOT_AGENT"
 
 
 def _atlassian_profile(runner, mocker, secret=b"my-secret-api-token"):

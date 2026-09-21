@@ -46,20 +46,55 @@ def test_codex_plugin_skills_path_exists():
     assert (ROOT / "plugins/mien" / skills.lstrip("./")).is_dir()
 
 
+def test_copilot_agent_plugin_manifest_valid():
+    marketplace = _read_json(".claude-plugin/marketplace.json")
+    entry = next(plugin for plugin in marketplace["plugins"] if plugin["name"] == "mien")
+    assert entry["source"] == {
+        "source": "git-subdir",
+        "url": "https://github.com/arinyaho/mien",
+        "path": "plugins/mien",
+        "ref": "main",
+    }
+    plugin = _read_json("plugins/mien/plugin.json")
+    assert plugin["$schema"] == "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+    assert plugin["name"] == "mien"
+    assert plugin["repository"] == "https://github.com/arinyaho/mien"
+    assert (ROOT / "plugins/mien/skills/mien/SKILL.md").is_file()
+
+
+def test_agent_docs_name_every_capture_marker():
+    from mien.security import CAPTURE_MARKER_VARS
+
+    skill = (ROOT / "plugins/mien/skills/mien/SKILL.md").read_text(encoding="utf-8")
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    for marker in CAPTURE_MARKER_VARS:
+        assert marker in skill
+        assert marker in security
+
+
+def test_readme_documents_copilot_marketplace_installation():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "**GitHub Copilot Chat:**" in readme
+    assert '"chat.plugins.marketplaces"' in readme
+    assert '"arinyaho/mien"' in readme
+
+
 def test_version_in_sync_across_all_manifests():
     claude = _read_json("plugins/mien/.claude-plugin/plugin.json")["version"]
     codex = _read_json("plugins/mien/.codex-plugin/plugin.json")["version"]
+    copilot = _read_json("plugins/mien/plugin.json")["version"]
     proj = _pyproject_version()
     skill = _skill_md_version()
     shared = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    assert claude == codex == proj == skill == shared, (
+    assert claude == codex == copilot == proj == skill == shared, (
         "version drift: "
-        f"claude={claude} codex={codex} pyproject={proj} skill={skill} shared={shared}"
+        f"claude={claude} codex={codex} copilot={copilot} "
+        f"pyproject={proj} skill={skill} shared={shared}"
     )
 
 
 def test_no_python_dunder_version_outside_the_release_targets():
-    # A `__version__ = "x.y.z"` literal is a sixth version string the release
+    # A `__version__ = "x.y.z"` literal is a seventh version string the release
     # script does not write, so it silently rots. The CLI reads installed
     # metadata instead; keep it that way.
     tracked = subprocess.run(
@@ -89,6 +124,11 @@ def test_release_version_updates_an_isolated_version_and_all_consumers():
             '{"name":"mien","version":"0.1.0-alpha.1","nested":{"version":"keep"}}\n',
             encoding="utf-8",
         )
+        (root / "plugins/mien/plugin.json").write_text(
+            '{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",'
+            '"name":"mien","version":"0.1.0-alpha.1"}\n',
+            encoding="utf-8",
+        )
         (root / "pyproject.toml").write_text(
             '[project]\nname = "mien"\nversion = "0.1.0-alpha.1"\n',
             encoding="utf-8",
@@ -112,6 +152,10 @@ def test_release_version_updates_an_isolated_version_and_all_consumers():
         }
         assert (root / "plugins/mien/.codex-plugin/plugin.json").read_text(encoding="utf-8") == (
             '{"name":"mien","version":"0.5.0","nested":{"version":"keep"}}\n'
+        )
+        assert (root / "plugins/mien/plugin.json").read_text(encoding="utf-8") == (
+            '{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",'
+            '"name":"mien","version":"0.5.0"}\n'
         )
         assert 'version = "0.5.0"' in (root / "pyproject.toml").read_text(encoding="utf-8")
         assert 'version: 0.5.0' in (root / "plugins/mien/skills/mien/SKILL.md").read_text(encoding="utf-8")

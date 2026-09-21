@@ -1,76 +1,120 @@
+<div align="center">
+
 # mien
 
-![License](https://img.shields.io/badge/license-MIT-green)
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)
-![GitHub Copilot](https://img.shields.io/badge/GitHub%20Copilot-agent%20plugin-24292F)
+**The right identity, in the right shell, every time.**
 
-Multi-identity credential router for Google, GitHub, and Slack — designed for developers juggling multiple accounts (personal + work) across services.
+[![Release](https://img.shields.io/github/v/release/arinyaho/mien?display_name=tag&sort=semver&style=flat-square)](https://github.com/arinyaho/mien/releases)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white&style=flat-square)](pyproject.toml)
+[![MIT License](https://img.shields.io/badge/License-MIT-2EA44F?style=flat-square)](LICENSE)
+[![Agent Skill](https://img.shields.io/badge/Agent_Skill-Claude_Code_%C2%B7_Codex_%C2%B7_Copilot-111827?style=flat-square)](#install-the-agent-skill)
 
-## What it does
+Route Google, GitHub, Slack, AWS, OCI, Atlassian, Notion, and your own secrets by identity.<br>
+Keep `personal` and `work` isolated without logging in and out all day.
 
-Activate a named identity in your current shell:
+[Install](#install) · [Quick start](#quick-start) · [Agent skill](#install-the-agent-skill) · [Security](SECURITY.md)
 
-```bash
-eval "$(mien use --owner-pid $$ personal)"   # or: mien-use personal (the wrapper passes $$ for you)
-gh pr list                 # uses your personal GitHub
-gcloud projects list       # uses your personal GCP
-TOKEN=$(mien token google) # mint a Gmail/Cal/Drive access token on demand
+</div>
+
+```console
+$ mien exec personal -- gh api user --jq .login
+personal-account
+
+$ mien exec work -- gh api user --jq .login
+work-account
 ```
 
-A second shell can run `mien-use work` (or `eval "$(mien use --owner-pid $$ work)"`) independently — activation touches only that shell. Tokens live in a secrets backend rather than in a dotfile.
+`mien` bundles each identity's credentials into a named profile and hands that profile to one shell or one command. Another terminal can use another profile at the same time. Credentials stay in GCP Secret Manager, macOS Keychain, or the system keyring instead of a dotfile.
 
-## Architecture
-
-- **Per-session env vars** activate `gcloud`, `gh`, etc.
-- **Ephemeral files** (mode 0600, `${TMPDIR}/mien/`) hold per-session ADC, SSH key and Slack tokens. `mien exec` and `mien run` delete theirs when the child exits; the ones `mien use` leaves for your shell are swept on a best-effort basis — see [SECURITY.md](SECURITY.md#lifetime-and-cleanup).
-- **Pluggable secrets backend**: GCP Secret Manager, macOS Keychain, or keyring (Linux Secret Service / Windows Credential Locker — free, no cloud, requires a desktop session).
-
-[SECURITY.md](SECURITY.md) describes what is stored where, who can read it, and what `mien` deliberately does not protect — including that it does **not** hide credentials from an AI agent it hands them to.
+| What you get | Why it matters |
+| --- | --- |
+| **Shell-local switching** | `mien-use personal` changes this shell, not every terminal on your machine. |
+| **Command-scoped execution** | `mien exec work -- gh pr list` carries its identity in the command, ideal for scripts and agents. |
+| **Project-aware routing** | `mien claim work` lets the directory choose a profile only after you approve it. |
+| **Wrong-identity guardrails** | A status line shows mismatches; `mien guard` can stop a commit made as the wrong you. |
+| **Agent-native setup** | One shared skill works with Claude Code, Codex, GitHub Copilot Chat, and Hermes Agent. |
 
 ## Install
 
-### CLI
+Requires Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) or [`pipx`](https://pipx.pypa.io/).
 
 ```bash
-uv tool install git+https://github.com/arinyaho/mien    # or: pipx install git+https://github.com/arinyaho/mien
-echo 'eval "$(mien shell-init)"' >> ~/.zshrc            # adds the mien-use / mien-unset wrappers
+uv tool install git+https://github.com/arinyaho/mien
+echo 'eval "$(mien shell-init)"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
-No checkout needed — both lines install from the repo directly. `mien shell-init` prints the shell wrappers; `eval`-ing it defines `mien-use` and `mien-unset` and wires the exit-trap cleanup. Use `--shell bash` (or add to `~/.bashrc`) for bash.
+Using bash? Add `eval "$(mien shell-init --shell bash)"` to `~/.bashrc` instead. Prefer pipx? Replace the first line with `pipx install git+https://github.com/arinyaho/mien`.
 
-To hack on it, clone and install from the working tree instead:
+## Quick start
 
 ```bash
-git clone https://github.com/arinyaho/mien ~/projects/mien
-cd ~/projects/mien && uv tool install --editable .
+mien init                              # choose where credentials live
+mien discover                          # inspect accounts already on this machine
+mien login personal --service github   # create a profile and add a credential
+mien-use personal                      # activate it in this shell
+gh api user --jq .login                # confirm which GitHub account is active
 ```
 
-### As an agent skill
+For automation and AI agents, carry the identity in every invocation instead of relying on shell state:
 
-`mien` ships a SKILL.md that teaches AI agents (Claude Code, Codex, GitHub Copilot Chat, Hermes Agent) when and how to invoke the CLI on your behalf. The skill assumes the `mien` binary is already on `PATH` — install the CLI first (above), then add the skill:
+```bash
+mien exec work -- gh pr list
+mien exec work -- aws sts get-caller-identity
+```
 
-> **One rule worth knowing yourself:** `mien` routes the environment-variable plane only. Your agent's built-in service connectors (Atlassian, Slack, Notion, Google) hold one fixed account each and ignore a profile switch entirely — so a session told to use `work` still reads Jira as whoever the connector authenticated as, silently. For any service a profile has credentials for, the agent should call the REST API under `mien exec <profile> -- `. The skill says so as its first rule; see [SECURITY.md](SECURITY.md#protection-goals-and-what-is-not-protected).
+For a project that should always use one identity:
 
-**Claude Code:**
+```bash
+cd ~/projects/acme
+mien claim work
+mien run -- gh pr list
+```
+
+`mien claim` writes a local `.mien`, approves it, and adds it to your global git ignore. A `.mien` from a cloned repository remains inert until you explicitly run `mien allow`.
+
+## Supported credentials
+
+| Profile service | Routed tools and APIs |
+| --- | --- |
+| Google | `gcloud`, `bq`, Gmail, Calendar, Drive |
+| GitHub | `gh`, Git over SSH |
+| Slack | Multiple workspace tokens per profile |
+| AWS | Named profiles or access keys |
+| OCI | CLI profiles and config files |
+| Atlassian | Jira and Confluence REST APIs |
+| Notion | Notion REST API |
+| Custom | Any single-secret environment variable, such as `NPM_TOKEN` or `ANTHROPIC_API_KEY` |
+
+## Install the agent skill
+
+Install the CLI first, then add the same `mien` skill to your agent. It teaches the agent to use command-scoped credentials when you say "as my work account" or "switch to personal."
+
+<details>
+<summary><strong>Claude Code</strong></summary>
 
 ```bash
 /plugin marketplace add arinyaho/mien
 /plugin install mien@arinyaho
 ```
 
-**Codex:**
+</details>
+
+<details>
+<summary><strong>Codex</strong></summary>
 
 ```bash
-codex plugin marketplace add arinyaho/mien --ref main   # register the marketplace
-codex plugin add mien@arinyaho                           # install the plugin
+codex plugin marketplace add arinyaho/mien --ref main
+codex plugin add mien@arinyaho
 ```
 
-Update the Codex plugin: `codex plugin marketplace upgrade arinyaho` then re-run `codex plugin add mien@arinyaho`. Uninstall: `codex plugin remove mien@arinyaho` (and, optionally, `codex plugin marketplace remove arinyaho`).
+Update with `codex plugin marketplace upgrade arinyaho`, then run `codex plugin add mien@arinyaho` again.
+
+</details>
 
 **GitHub Copilot Chat:**
 
-Enable Agent Plugins and add the mien marketplace in VS Code's `settings.json`:
+Enable Agent Plugins and add the marketplace in VS Code's `settings.json`:
 
 ```json
 {
@@ -79,24 +123,37 @@ Enable Agent Plugins and add the mien marketplace in VS Code's `settings.json`:
 }
 ```
 
-Open the Extensions view, search `@agentPlugins mien`, and select **Install**. VS Code installs the shared Agent Skill directly; Claude CLI is not required.
+Open Extensions, search for `@agentPlugins mien`, and select **Install**. Claude CLI is not required.
 
-**Hermes Agent:**
+<details>
+<summary><strong>Hermes Agent</strong></summary>
 
 ```bash
-# Install directly from GitHub
 hermes skills install arinyaho/mien/skills/mien
-
-# Or add the repo as a tap source, then install
-hermes skills tap add arinyaho/mien
-hermes skills install mien
-
-# Or manually
-git clone https://github.com/arinyaho/mien ~/.hermes/skills/_src/mien
-ln -s ~/.hermes/skills/_src/mien/skills/mien ~/.hermes/skills/mien
 ```
 
-Once installed, the agent invokes `mien` automatically when you mention identity-scoped work — e.g. "as my work account", "switch to personal".
+Or register the repository first with `hermes skills tap add arinyaho/mien`, then run `hermes skills install mien`.
+
+</details>
+
+> [!IMPORTANT]
+> `mien` routes credentials through environment variables. An agent's built-in Slack, Atlassian, Notion, or Google connector keeps its own fixed login and does not observe profile switches. For a service stored in a `mien` profile, use a direct API call under `mien exec <profile> --`. See the [security model](SECURITY.md#protection-goals-and-what-is-not-protected).
+
+## How it works
+
+- **Per-session environment variables** activate tools such as `gcloud`, `gh`, `aws`, and `oci` without changing another shell.
+- **Mode-0600 ephemeral files** under `${TMPDIR}/mien/` carry ADC, SSH keys, and Slack tokens. `mien exec` and `mien run` delete theirs when the child exits; shell-scoped files are swept on a best-effort basis.
+- **Pluggable secret storage** supports GCP Secret Manager, macOS Keychain, and keyring-backed Linux Secret Service or Windows Credential Locker.
+
+Read [SECURITY.md](SECURITY.md) for the trust model, credential lifetime, and explicit limitations. In particular, `mien` cannot hide a credential from a process or AI agent to which you deliberately hand that credential.
+
+### Development install
+
+```bash
+git clone https://github.com/arinyaho/mien ~/projects/mien
+cd ~/projects/mien
+uv tool install --editable .
+```
 
 ## Bootstrap
 

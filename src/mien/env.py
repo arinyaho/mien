@@ -81,6 +81,24 @@ class PlannedVar:
     # field the service is missing.
     configured: bool = True
 
+    def __post_init__(self) -> None:
+        if self.value_type == "value":
+            _VAR_VALUE_TYPES = {
+                "GOOGLE_APPLICATION_CREDENTIALS": "credential_file_path",
+                "GH_TOKEN": "secret",
+                "MIEN_SLACK_TOKENS": "credential_file_path",
+                "MIEN_SLACK_DEFAULT_WORKSPACE": "selector",
+                "MIEN_SLACK_DEFAULT_TOKEN": "secret",
+                "AWS_ACCESS_KEY_ID": "secret",
+                "AWS_SECRET_ACCESS_KEY": "secret",
+                "ATLASSIAN_API_TOKEN": "secret",
+                "NOTION_TOKEN": "secret",
+            }
+            if self.var in _VAR_VALUE_TYPES:
+                object.__setattr__(self, "value_type", _VAR_VALUE_TYPES[self.var])
+            elif self.service == "custom":
+                object.__setattr__(self, "value_type", "secret")
+
 
 def plan_env(profile: Profile) -> list[PlannedVar]:
     """Which variables `build_env` would set for ``profile``, and which it would not.

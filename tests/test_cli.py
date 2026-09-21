@@ -175,7 +175,7 @@ def test_whoami_names_the_variables_of_a_service_the_profile_lacks(
     env = {v["var"]: v for v in json.loads(out.output)["env"]}
     assert env["GH_TOKEN"] == {"var": "GH_TOKEN", "service": "github",
                                "set": False, "configured": False,
-                               "value_type": "value",
+                               "value_type": "secret",
                                "note": "this profile configures no github"}
     assert env["NOTION_TOKEN"]["set"] and env["NOTION_TOKEN"]["configured"]
 

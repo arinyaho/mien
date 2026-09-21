@@ -57,7 +57,7 @@ from mien.resolve import (AmbiguousScope, claimed_profile, git_author_email,
                           resolve_remote_profile)
 from mien.verify import Status, probe_aws, probe_github, probe_google, run_probe_safely
 from mien.secret_naming import BUILTIN_DEFAULT, BUILTIN_SLACK_TOKEN, render_name
-from mien.security import capture_context, redact, redact_bytes, register_secret
+from mien.security import capture_context, redact, redact_bytes, register_secret, legacy_slack_token_enabled
 from mien.shell import (BUILTIN_VARS, MIEN_INTERNAL_OWNER, NON_SECRET_VARS,
                         custom_vars, emit_unset, emit_use, render_shell_init)
 from mien.statusline import guard_reason, render_segment
@@ -176,6 +176,8 @@ class MienGroup(click.Group):
             # contain a backend exception, command argument, or credential file
             # value. Sanitize even errors commands raised deliberately.
             exc.message = redact(exc.message)
+            raise
+        except click.Abort:
             raise
         except Exception as exc:
             msg = _friendly_backend_message(exc)
@@ -1425,6 +1427,8 @@ def _run_as_profile(cfg: Config, prof: Profile, argv: tuple[str, ...]) -> None:
     try:
         bundle = build_env(prof, backend, pid=store.pid)
         env = {**os.environ, **bundle.env}
+        if not legacy_slack_token_enabled():
+            env.pop("MIEN_SLACK_DEFAULT_TOKEN", None)
         secret_env = {
             "GH_TOKEN", "MIEN_SLACK_DEFAULT_TOKEN", "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY", "ATLASSIAN_API_TOKEN", "NOTION_TOKEN",
@@ -1439,22 +1443,30 @@ def _run_as_profile(cfg: Config, prof: Profile, argv: tuple[str, ...]) -> None:
             # child traceback or diagnostic cannot replay a credential it read
             # from one of mien's 0600 files. A human terminal keeps the normal
             # inherited streams and interactivity.
-            completed = subprocess.run(
+            import threading
+            proc = subprocess.Popen(
                 list(argv), env=env, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            for stream, data in (
-                (sys.stdout, completed.stdout), (sys.stderr, completed.stderr)
-            ):
-                safe = redact_bytes(data)
-                binary = getattr(stream, "buffer", None)
-                if binary is not None:
-                    binary.write(safe)
-                    binary.flush()
-                else:  # click's test streams and unusual embedders
-                    stream.write(safe.decode("utf-8", errors="replace"))
-                    stream.flush()
-            rc = completed.returncode
+            def _stream(pipe_in, pipe_out):
+                try:
+                    binary_out = getattr(pipe_out, "buffer", pipe_out)
+                    for line in pipe_in:
+                        safe = redact_bytes(line)
+                        if binary_out is pipe_out:
+                            pipe_out.write(safe.decode("utf-8", errors="replace"))
+                        else:
+                            binary_out.write(safe)
+                        pipe_out.flush()
+                except Exception:
+                    pass
+            t1 = threading.Thread(target=_stream, args=(proc.stdout, sys.stdout))
+            t2 = threading.Thread(target=_stream, args=(proc.stderr, sys.stderr))
+            t1.start()
+            t2.start()
+            rc = proc.wait()
+            t1.join()
+            t2.join()
         else:
             rc = subprocess.call(list(argv), env=env)
     finally:

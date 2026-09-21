@@ -220,7 +220,7 @@ For Slack (multi-workspace per profile):
 # Resolve from the 0600 map inside the child. Feed curl's header through stdin,
 # not argv, so the token reaches neither the parent shell nor ps output.
 $MIEN exec work-foo -- sh <<'SH'
-TOKEN=$(jq -r --arg ws "$MIEN_SLACK_DEFAULT_WORKSPACE" '.[$ws]' "$MIEN_SLACK_TOKENS")
+TOKEN=$(jq -r '."team-a"' "$MIEN_SLACK_TOKENS")
 printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
   curl -sK - --url https://slack.com/api/conversations.list
 SH

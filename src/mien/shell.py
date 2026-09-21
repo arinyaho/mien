@@ -140,6 +140,7 @@ SHELL_CRITICAL_VARS: dict[str, str] = {
     # credential. The `unset` half misdirects too: a shell deliberately pointed
     # at another config silently falls back to the default one.
     "MIEN_CONFIG": "where mien reads and writes the config that holds every profile",
+    "MIEN_SLACK_LEGACY_DEFAULT_TOKEN": "controlling legacy raw-token Slack compatibility",
 }
 
 # `CAPTURE_MARKER_VARS` is imported from `mien.security`: markers that say an

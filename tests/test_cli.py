@@ -1791,7 +1791,7 @@ def test_token_refuses_in_a_codex_session(runner, mien_cfg, mocker):
 
 
 def test_capture_context_detects_a_copilot_session(monkeypatch):
-    from mien.cli import capture_context
+    from mien.security import capture_context
 
     monkeypatch.setenv("COPILOT_AGENT", "1")
     assert capture_context() == "COPILOT_AGENT"

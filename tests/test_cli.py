@@ -70,7 +70,8 @@ def test_status_prints_a_value_only_for_the_pinned_non_secret_vars(
     assert all(f"  {v}=<set>" in out for v in masked)
 
 
-def test_init_writes_keychain_skeleton(runner, mien_cfg):
+def test_init_writes_keychain_skeleton(runner, mien_cfg, mocker):
+    mocker.patch("mien.cli.load_backend").return_value.health_check.return_value = None
     result = runner.invoke(main, ["init"], input="2\nmien-\n")
     assert result.exit_code == 0, result.output
     payload = json.loads(mien_cfg.read_text())

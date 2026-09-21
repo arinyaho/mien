@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from mien.config import Profile
-from mien.env import BUILTIN_VARS, MIEN_INTERNAL_OWNER, EnvBundle
-from mien.security import CAPTURE_MARKER_VARS
+from mien.env import BUILTIN_VARS, MIEN_INTERNAL_OWNER as MIEN_INTERNAL_OWNER, EnvBundle
+from mien.security import CAPTURE_MARKER_VARS as CAPTURE_MARKER_VARS
 
 # The shell wrappers, as one canonical source. `mien shell-init` prints this so a
 # user can wire it up with `eval "$(mien shell-init)"` — no repo checkout needed,

@@ -132,11 +132,11 @@ def test_known_vars_is_derived_from_the_builtin_owner_map():
 def test_the_capture_markers_the_detector_reads_are_exactly_the_refused_ones(monkeypatch):
     """One list, two readers — pinned by injecting a marker neither hard-codes.
 
-    The bug this pins: `capture_context` detected three markers that
+    The bug this pins: `capture_context` detected markers that
     `check_custom_var_name` did not refuse, so `mien login --name CLAUDECODE` was
     accepted and the union-scrub then emitted `unset CLAUDECODE` in every shell,
     silently disarming the `mien token` and `mien exec` refusals. A test that
-    listed the three names would go stale the moment a fourth is added — the
+    copied the names would go stale the moment another is added — the
     reopening would look exactly like today's green suite. So instead: add a
     marker at runtime and assert BOTH sides move. A hand-copied list on either
     side fails this.

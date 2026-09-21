@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "mien",
+  "version": "0.7.0",
+  "description": "Multi-identity credential router for Google, GitHub, Slack, Atlassian, Notion, AWS, and OCI.",
+  "author": {
+    "name": "arinyaho",
+    "email": "arinyaho@gmail.com",
+    "url": "https://github.com/arinyaho"
+  },
+  "homepage": "https://github.com/arinyaho/mien",
+  "repository": "https://github.com/arinyaho/mien",
+  "license": "MIT",
+  "keywords": [
+    "identity",
+    "credentials",
+    "multi-account",
+    "github-copilot"
+  ]
+}

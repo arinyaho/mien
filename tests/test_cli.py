@@ -1789,6 +1789,13 @@ def test_token_refuses_in_a_codex_session(runner, mien_cfg, mocker):
     assert "CODEX_THREAD_ID" in result.output
 
 
+def test_capture_context_detects_a_copilot_session(monkeypatch):
+    from mien.cli import capture_context
+
+    monkeypatch.setenv("COPILOT_AGENT", "1")
+    assert capture_context() == "COPILOT_AGENT"
+
+
 def _atlassian_profile(runner, mocker, secret=b"my-secret-api-token"):
     """A configured profile whose atlassian API token is `secret`."""
     backend = mocker.patch("mien.cli.load_backend").return_value

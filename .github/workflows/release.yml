@@ -18,4 +18,5 @@ jobs:
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" --generate-notes
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --generate-notes

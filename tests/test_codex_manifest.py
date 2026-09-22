@@ -73,10 +73,10 @@ def test_agent_docs_name_every_capture_marker():
 
 
 def test_readme_documents_copilot_marketplace_installation():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "**GitHub Copilot Chat:**" in readme
-    assert '"chat.plugins.marketplaces"' in readme
-    assert '"arinyaho/mien"' in readme
+    guide = (ROOT / "docs/guide.md").read_text(encoding="utf-8")
+    assert "**GitHub Copilot Chat:**" in guide
+    assert '"chat.plugins.marketplaces"' in guide
+    assert '"arinyaho/mien"' in guide
 
 
 def test_version_in_sync_across_all_manifests():

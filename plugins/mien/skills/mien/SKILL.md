@@ -1,6 +1,6 @@
 ---
 name: mien
-description: Use when the user wants to act as a specific identity/profile across Google (Gmail/Calendar/Drive/GCP), GitHub, Slack, Atlassian, Notion, AWS, or OCI — e.g., "as my work account", "switch to <name>", "post in <workspace>", "send mail from <email>". Also covers a credential of the user's own kept per identity — an LLM API key, an npm/PyPI token, a database URL — delivered as an environment variable ("my work Anthropic key", "the npm token for this profile"). Activates per-shell credentials for `gh`, `gcloud`, `bq`, `aws`, `oci`, and `curl` calls without polluting other agent sessions.
+description: You share this machine with the user, and can act as the wrong identity if you don't check first. Use when the user wants to act as a specific identity/profile across Google (Gmail/Calendar/Drive/GCP), GitHub, Slack, Atlassian, Notion, AWS, or OCI — e.g., "as my work account", "switch to <name>", "post in <workspace>", "send mail from <email>". Also covers a credential of the user's own kept per identity — an LLM API key, an npm/PyPI token, a database URL — delivered as an environment variable ("my work Anthropic key", "the npm token for this profile"). Activates per-shell credentials for `gh`, `gcloud`, `bq`, `aws`, `oci`, and `curl` calls without polluting other agent sessions.
 version: 0.8.0
 author: arinyaho
 license: MIT
@@ -13,7 +13,9 @@ metadata:
 
 # mien — Multi-identity credential router
 
-The user maintains multiple identities, each bundling a Google account (Gmail/Calendar/Drive + GCP) and optionally a GitHub account, one or more Slack workspaces, an Atlassian account (Jira/Confluence), a Notion integration token, AWS credentials, an OCI profile, and/or any credential of their own stored per identity (`custom`: one environment variable name, one secret — an LLM API key, an npm token, a database URL). Use `mien` to activate the right identity in this shell session.
+You are an agent sharing this machine with its owner. Acting as the wrong identity is the failure mode this tool exists to prevent — not by hiding credentials from you, but by refusing a handover when the identity you're given disagrees with whose repository or workspace you're about to act in.
+
+The user maintains multiple identities, each bundling a Google account (Gmail/Calendar/Drive + GCP) and optionally a GitHub account, one or more Slack workspaces, an Atlassian account (Jira/Confluence), a Notion integration token, AWS credentials, an OCI profile, and/or any credential of their own stored per identity (`custom`: one environment variable name, one secret — an LLM API key, an npm token, a database URL). Use `mien` to activate the right identity in this shell session, and expect a refusal — not a silent misroute — when the identity and the target disagree.
 
 ## Rule zero — if mien holds the credential, do not use a connector
 

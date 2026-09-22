@@ -5,7 +5,7 @@
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)
 ![GitHub Copilot](https://img.shields.io/badge/GitHub%20Copilot-agent%20plugin-24292F)
 
-Per-shell multi-identity credential router for AI agents and humans — for developers juggling multiple accounts (personal + work) across Google, GitHub, Slack, and more. Tokens stay in your secrets vault, never in the shell.
+Your agent shares your machine, and its failure mode isn't a crash — it's succeeding as the wrong you: committing to a repository under an identity that isn't yours, or being handed a credential for one that doesn't own the repo it's in. mien is a per-shell credential router for AI agents and humans: it activates one identity at a time and refuses the handover rather than guessing when the identity requested disagrees with whose repository it's in — across Google, GitHub, Slack, Atlassian, Notion, AWS, and OCI. Tokens stay in your secrets vault, never in the shell.
 
 ## What it does
 

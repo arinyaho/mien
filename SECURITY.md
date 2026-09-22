@@ -6,6 +6,8 @@ Everything here is stated against the code. If you find a claim the code does no
 
 ## Protection goals, and what is not protected
 
+**The refusal only covers paths that go through `mien`.** `mien guard` and `mien exec` can refuse a mismatched identity on a commit they check or a handover they see — never on a path they never touch. A credential sitting in a plaintext file `mien` didn't write, or a service reached through an AI harness's own connector instead of `mien exec`, is out of reach: `mien` cannot refuse a path it never sees. That's a boundary of the design, stated plainly rather than left to be discovered.
+
 **Isolating identities between concurrent shells.** Activation only ever writes to the current process environment and to files keyed by that process. Two terminals, or two AI agent sessions, can hold different identities at once without coordinating.
 
 *Not protected:* the credential stores those identities point at are shared. `AWS_PROFILE` selects among credentials in `~/.aws`; `CLOUDSDK_ACTIVE_CONFIG_NAME` selects a gcloud configuration whose credential store is global. Two sessions that run an interactive `gcloud auth login` at the same time will race.

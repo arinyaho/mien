@@ -83,4 +83,14 @@ Git remote owners:
 
 It reads no secret and touches no backend. Claiming an owner is the one thing that writes: `mien discover --own github.com/me --profile personal` adds `github.com/me/*` to that profile's [`owns_remotes`](docs/guide.md#project-pinned-identity) — which is what the status line, `mien guard` and `mien exec` read to tell whose place a repository is. Importing a credential stays an explicit `mien login`.
 
+## FAQ
+
+**Does it work with AI coding agents?** Yes — Claude Code, Codex, GitHub Copilot Chat, and Hermes Agent all install the skill. It only routes the environment-variable plane, not an agent's own service connectors; see the [one rule](#as-an-agent-skill) above.
+
+**Are my tokens stored in a dotfile?** No. They live in a secrets backend (GCP Secret Manager, macOS Keychain, or an OS keyring); only references and short-lived files touch disk — see [SECURITY.md](SECURITY.md).
+
+**What stops me from committing as the wrong identity?** `mien guard` (a pre-commit hook) and `mien exec` both refuse when the active or named identity disagrees with the repository's owner — see [Refuse to act as the wrong you](docs/guide.md#refuse-to-act-as-the-wrong-you).
+
+**Does it need a cloud account?** No — the `keyring` backend (Linux Secret Service / Windows Credential Locker) and macOS Keychain both work with no cloud dependency.
+
 Full reference — profile export inspection, workspace binding, status line, identity guards, git integration, custom credentials, ambient env — lives in **[docs/guide.md](docs/guide.md)**.

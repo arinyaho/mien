@@ -149,6 +149,10 @@ These are real and currently unfixed. They are tracked, and listed here rather t
 
 Releases are not currently signed, and installation is from source. Until that changes, verify by reading: the code is MIT-licensed and the storage surface is small enough to audit in an afternoon — the four functions that write to disk are in `config.py`, `ambient.py`, `ephemeral.py`, and `shell.py`.
 
+## No warranty
+
+`mien` is MIT-licensed. That license's standard clause applies in full: the software is provided "as is", with no warranty, and the authors are not liable for any claim or damages arising from its use — including a credential mishandled, misrouted, or exposed by a bug in this tool. Read the full clause in [LICENSE](LICENSE) before trusting it with credentials that matter.
+
 ## Reporting a vulnerability
 
 Open a GitHub issue for anything already public, such as a wrong claim in this file. For something exploitable that is not yet public, use GitHub's private vulnerability reporting on this repository rather than an issue.

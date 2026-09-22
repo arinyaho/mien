@@ -10,7 +10,8 @@ Fast, no network required.
 
 ## Invariants a PR must not break
 
-These come from [CLAUDE.md](CLAUDE.md):
+These are load-bearing invariants of the tool itself, not just style
+preferences:
 
 - **Activation is stateless.** Environment set by `mien use` doesn't survive
   past the shell it was set in. Code and docs must not assume a profile

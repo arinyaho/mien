@@ -2,6 +2,45 @@
 
 Full usage reference. For install and a quickstart, see [README.md](../README.md).
 
+## Agent skill install
+
+**Codex:**
+
+```bash
+codex plugin marketplace add arinyaho/mien --ref main   # register the marketplace
+codex plugin add mien@arinyaho                           # install the plugin
+```
+
+Update the Codex plugin: `codex plugin marketplace upgrade arinyaho` then re-run `codex plugin add mien@arinyaho`. Uninstall: `codex plugin remove mien@arinyaho` (and, optionally, `codex plugin marketplace remove arinyaho`).
+
+**GitHub Copilot Chat:**
+
+Enable Agent Plugins and add the mien marketplace in VS Code's `settings.json`:
+
+```json
+{
+  "chat.plugins.enabled": true,
+  "chat.plugins.marketplaces": ["arinyaho/mien"]
+}
+```
+
+Open the Extensions view, search `@agentPlugins mien`, and select **Install**. VS Code installs the shared Agent Skill directly; Claude CLI is not required.
+
+**Hermes Agent:**
+
+```bash
+# Install directly from GitHub
+hermes skills install arinyaho/mien/skills/mien
+
+# Or add the repo as a tap source, then install
+hermes skills tap add arinyaho/mien
+hermes skills install mien
+
+# Or manually
+git clone https://github.com/arinyaho/mien ~/.hermes/skills/_src/mien
+ln -s ~/.hermes/skills/_src/mien/skills/mien ~/.hermes/skills/mien
+```
+
 ## What does a profile actually export?
 
 `mien whoami <profile>` answers it without printing a secret:

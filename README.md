@@ -5,7 +5,7 @@
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2)
 ![GitHub Copilot](https://img.shields.io/badge/GitHub%20Copilot-agent%20plugin-24292F)
 
-Multi-identity credential router for Google, GitHub, and Slack — designed for developers juggling multiple accounts (personal + work) across services.
+Per-shell multi-identity credential router for AI agents and humans — for developers juggling multiple accounts (personal + work) across Google, GitHub, Slack, and more. Tokens stay in your secrets vault, never in the shell.
 
 ## What it does
 

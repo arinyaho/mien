@@ -93,4 +93,8 @@ It reads no secret and touches no backend. Claiming an owner is the one thing th
 
 **Does it need a cloud account?** No — the `keyring` backend (Linux Secret Service / Windows Credential Locker) and macOS Keychain both work with no cloud dependency.
 
-Full reference — profile export inspection, workspace binding, status line, identity guards, git integration, custom credentials, ambient env — lives in **[docs/guide.md](docs/guide.md)**.
+Full reference — profile export inspection, workspace binding, status line, identity guards, git integration, custom credentials, ambient env — lives in **[docs/guide.md](docs/guide.md)**. The reasoning behind non-obvious decisions lives in **[docs/design-rationale.md](docs/design-rationale.md)**.
+
+## Contributing
+
+Found a bug or want to pick up a task? File it or find one on [GitHub Issues](https://github.com/arinyaho/mien/issues) — `good-first-issue` marks a small, well-scoped starting point. See [CONTRIBUTING.md](CONTRIBUTING.md) for the test command and the invariants a PR must not break.

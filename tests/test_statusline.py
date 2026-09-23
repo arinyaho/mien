@@ -247,8 +247,9 @@ def test_statusline_shows_no_claim_for_an_ambiguous_remote(tmp_path, monkeypatch
     """The status line receives the raw `origin` URL (with scheme) from
     git_origin_remote, unlike discover's report or --own's samples, which
     only ever see an already-normalized, schemeless string -- so this is
-    one of the two call sites (with `mien guard`) that actually reach
-    remote_authority_is_ambiguous's whole-path scan. A remote whose path
+    one of three call sites (with `mien guard` and `mien exec`'s own veto,
+    the security-critical one, already covered in test_handover.py) that
+    actually reach remote_authority_is_ambiguous's whole-path scan. A remote whose path
     merely contains '@' (github.com/user@company/repo here -- a real,
     correctly-parsed host) is exactly the shape resolve_remote_profile
     declines to trust at all now, even though it could confidently claim
@@ -515,6 +516,23 @@ def test_guard_blocks_a_wrong_commit_author_with_nothing_active(tmp_path, monkey
                         author_email="me@personal.example")
     assert result.exit_code == 1
     assert "authored as personal" in result.output
+
+
+def test_guard_allows_on_an_ambiguous_remote(tmp_path, monkeypatch):
+    """`mien guard` reaches `remote_authority_is_ambiguous`'s whole-path scan
+    the same way the status line does -- `guard_cmd` also calls
+    `git_origin_remote` raw and passes it straight through `claimed_profile`.
+    A remote whose path merely contains '@' (a real, correctly-parsed host)
+    is exactly the shape resolve_remote_profile now declines to trust, so
+    `claimed_profile` reports no claim and guard has nothing to compare
+    against -- it fails open here on the same "nothing claims this place"
+    path it always has, same accepted trade-off as the status line's
+    matching test."""
+    _write_cfg_remotes(tmp_path, monkeypatch, work=["github.com/user"])
+    result = _run_guard("/flat/api", monkeypatch, mien_profile="personal",
+                        remote="https://github.com/user@company/repo")
+    assert result.exit_code == 0
+    assert result.output.strip() == ""
 
 
 def test_guard_allows_when_consistent(tmp_path, monkeypatch):

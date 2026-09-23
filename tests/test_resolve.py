@@ -163,9 +163,23 @@ class TestRemoteAuthorityIsAmbiguous:
         # exactly why nothing may guess an owner from it either way.
         assert remote_authority_is_ambiguous("https://github.com/user@company/repo")
 
+    def test_flags_an_at_sign_anywhere_in_the_path_not_only_the_first_segment(self):
+        # A truncated userinfo can itself contain more than one unencoded
+        # '/' before its own '@' (https://work/sekrit/more@github.com/...),
+        # which leaves the leftover '@' in a later segment. Scanning only
+        # the first segment was the right trade-off for the old guessing
+        # design (a miss there just meant "no match"); it is the wrong one
+        # here, where a miss means refusal_reason silently allows the
+        # handover for a genuinely unparseable origin. There is no
+        # corresponding false-positive risk to widening this: unlike the
+        # old recovery guess, this never names an owner, so it costs at
+        # most a spurious refusal, never a misattribution.
+        assert remote_authority_is_ambiguous(
+            "https://work/sekrit/more@github.com/acme/repo")
+        assert remote_authority_is_ambiguous("https://github.com/acme/x@v2")
+
     def test_does_not_flag_an_ordinary_remote(self):
         assert not remote_authority_is_ambiguous("https://github.com/acme/x")
-        assert not remote_authority_is_ambiguous("https://github.com/acme/x@v2")
 
     def test_does_not_flag_a_non_url_remote(self):
         assert not remote_authority_is_ambiguous("/srv/git/repo")

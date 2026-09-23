@@ -151,6 +151,17 @@ class TestRefusalReason:
         assert "personal" in reason
         assert "could not be parsed with confidence" in reason
 
+    def test_refuses_a_multi_slash_truncated_userinfo_too(self):
+        """A truncated userinfo can itself contain more than one unencoded
+        '/' before its own '@'; this must still refuse, not silently allow
+        the handover -- see remote_authority_is_ambiguous's own note on why
+        scanning only the first path segment is the wrong trade-off here."""
+        reason = refusal_reason(
+            _owns_remotes(work=["github.com/acme/*"]), "/flat/api", "personal",
+            remote="https://work/sekrit/more@github.com/acme/api", agent_driven=True,
+        )
+        assert reason is not None
+
     def test_allows_a_human_against_an_ambiguous_origin(self):
         assert refusal_reason(
             _owns_remotes(work=["github.com/acme/*"]), "/flat/api", "personal",

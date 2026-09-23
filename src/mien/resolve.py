@@ -315,6 +315,21 @@ def remote_authority_is_ambiguous(remote: str) -> bool:
     an unresolvable authority is not evidence of nothing, it is evidence of
     not knowing, and guessing either way risks the failure this exists to
     prevent.
+
+    Checks the whole path for a leftover `@`, not only its first segment: a
+    truncated userinfo can itself contain more than one unencoded `/` before
+    its own `@` (`https://work/sekrit/more@github.com/...`), which would
+    otherwise leave this returning False for a shape every bit as
+    unparseable as the single-slash case. Scanning only the first segment
+    was the right trade-off for the old guessing design — a missed
+    detection there just meant "no match", the same safe direction as an
+    ordinary unowned remote. It is the wrong trade-off here: a missed
+    detection now means `refusal_reason` silently *allows* the handover for
+    a genuinely unparseable origin, the opposite of what this function
+    exists to prevent. There is no corresponding downside to scanning
+    further: unlike the old recovery guess, this never names an owner, so a
+    broader match only ever costs a spurious refusal, never a
+    misattribution — the same accepted direction as every other case here.
     """
     if "://" not in remote:
         return False
@@ -324,8 +339,7 @@ def remote_authority_is_ambiguous(remote: str) -> bool:
     parts = _authority(s)
     if not parts:
         return False
-    after_leading_slash = parts[2].lstrip("/")
-    return "@" in after_leading_slash.split("/", 1)[0]
+    return "@" in parts[2].lstrip("/")
 
 
 def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | None:

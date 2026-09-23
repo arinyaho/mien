@@ -184,6 +184,13 @@ class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
         ps = profiles(rprof("work", "company/repo"))
         assert resolve_remote_profile(ps, "https://github.com/user@company/repo") is None
 
+    def test_a_dotted_path_fragment_is_not_mistaken_for_a_truncated_host(self):
+        # The ordinary host here (`github.com`) parsed in full -- it was
+        # never truncated -- so a dot elsewhere in the path (an issue
+        # number, not a host) must not trigger the recovery at all.
+        ps = profiles(rprof("work", "issue.42"))
+        assert resolve_remote_profile(ps, "https://github.com/foo/bar@issue.42") is None
+
     def test_an_ambiguous_scope_error_never_repeats_the_userinfo_fragment(self):
         # A tie found through the recovery path must report the recovered,
         # credential-free form -- never the unrecovered `norm`, which still

@@ -318,7 +318,13 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     norm = normalize_remote(remote)
     best = _owner_matches(norm, profiles)
     matched = norm
-    if not best and "://" in remote:
+    # Only worth a second guess when the ordinary host itself looks
+    # truncated (no `.`, unlike a real registered hostname) -- a URL whose
+    # authority parsed in full, dotted host and all, was never the shape
+    # this recovers, no matter what its path happens to contain (an issue
+    # number, an npm-style @scope): trying it there is how the recovery
+    # itself came to spuriously match `.../bar@issue.42` in review.
+    if not best and "://" in remote and "." not in norm.split("/", 1)[0]:
         recovered = remote.strip()
         if recovered.endswith(".git"):
             recovered = recovered[:-4]

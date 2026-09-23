@@ -218,6 +218,19 @@ class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
             resolve_remote_profile(ps, "https://user/pass@github.com/acme/repo")
         assert "user" not in str(exc.value) and "pass" not in str(exc.value)
 
+    def test_a_second_at_sign_deeper_in_the_path_never_claims_the_wrong_owner(self):
+        # The recovery boundary is the FIRST '@' after the truncation point,
+        # not the last '@' anywhere in the URL: using the last one would
+        # recover "evil.com/repo" here and falsely claim a host that was
+        # never part of the authority -- the "wrong identity" failure this
+        # module exists to prevent. The correctly-recovered candidate
+        # ("host.com/owner@evil.com/repo") is unusual enough that it need
+        # not match the real owner's plain glob either; not claiming an
+        # owner nobody configured is the property this asserts.
+        unrelated_host = profiles(rprof("evil", "evil.com/repo"))
+        assert resolve_remote_profile(
+            unrelated_host, "https://user/pass@host.com/owner@evil.com/repo") is None
+
 
 class TestResolveRemoteProfile:
     def test_matches_the_owning_profile(self):

@@ -204,20 +204,6 @@ def _authority(url: str) -> tuple[str, str, str] | None:
     return u.netloc.rpartition("@")[0], u.hostname or "", u.path
 
 
-def _strip_to_scheme_and_last_at(url: str) -> str:
-    """``url``, whitespace and a trailing ``.git`` gone, with everything up to
-    and including its *last* ``@`` after the scheme discarded too.
-
-    Shared by `normalize_remote`'s unparseable-authority fallback and
-    `resolve_remote_profile`'s recovery candidate, which both need exactly
-    this reduction — one path length would otherwise drift from the other.
-    """
-    s = url.strip()
-    if s.endswith(".git"):
-        s = s[:-4]
-    return s.partition("://")[2].rpartition("@")[2]
-
-
 def normalize_remote(url: str) -> str:
     """Reduce a git remote URL to a canonical, lower-cased ``host/path``.
 
@@ -245,7 +231,7 @@ def normalize_remote(url: str) -> str:
     if "://" in s:
         parts = _authority(s)
         # host + path drops the scheme, any `user@` and any `:port` at once.
-        s = parts[1] + parts[2] if parts else _strip_to_scheme_and_last_at(url)
+        s = parts[1] + parts[2] if parts else s.partition("://")[2].rpartition("@")[2]
     elif re.match(r"^[^/]+@[^:/]+:", s):                   # scp-like git@host:path
         s = re.sub(r"^[^@]+@", "", s).replace(":", "/", 1)
     return s.rstrip("/").lower()
@@ -310,13 +296,13 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     As with directory scopes, the longest matching pattern wins and an exact tie
     raises AmbiguousScope rather than guessing.
 
-    When the ordinary normalization matches nothing, retry against the same
-    last-``@`` recovery `_authority`'s unparseable-authority branch already
-    uses — `normalize_remote` itself cannot risk that guess generally (see its
-    docstring), but here it can be tested against the *configured* owners
-    instead of trusted blind: tried only on an empty first result, so it can
-    recover a real owner `normalize_remote`'s ambiguity hid, but can never
-    override or outrank a match the ordinary normalization already found.
+    When the ordinary normalization matches nothing, retry with the real
+    host recovered — `normalize_remote` itself cannot risk that guess
+    generally (see its docstring), but here it can be tested against the
+    *configured* owners instead of trusted blind: tried only on an empty
+    first result, so it can recover a real owner `normalize_remote`'s
+    ambiguity hid, but can never override or outrank a match the ordinary
+    normalization already found.
 
     The retry is gated on the exact shape `_authority`'s own docstring names —
     a successful parse whose path starts with a segment containing `@`, the
@@ -325,17 +311,25 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     host instead (an earlier version of this guard did) tests the wrong
     string: in the truncated shape that "host" is the truncated userinfo, not
     a host, and a real username containing a dot (`firstname.lastname`) made
-    that version skip recovery for the exact bug this exists to catch. The
-    candidate is still discarded unless its *recovered* host contains a `.` —
-    an ordinary path segment the same split can catch instead (an npm-style
-    `@scope`, a bare word) usually lacks one — which closes most of the
-    false-match surface against a hand-edited, host-less `owns_remotes` glob.
-    A wrong guess that still gets through only costs a spurious claim or
-    refusal, never a mis-selected identity — a remote's owner never chooses
-    which profile acts. Every message below reports whichever form actually
-    produced the match, never the unrecovered `norm`, so a raised exception
-    cannot repeat a userinfo fragment `_authority` was written specifically to
-    keep out of a message.
+    that version skip recovery for the exact bug this exists to catch.
+
+    The recovered candidate is everything after that segment's *first* `@`,
+    not the last `@` anywhere in the URL (an earlier version of this used the
+    same last-`@` strip `normalize_remote`'s blind fallback uses, which is
+    wrong once the truncation point is actually known): a later, unrelated
+    `@` further down the path — `.../owner@evil.com/repo` — would otherwise
+    both miss the real owner and falsely claim `evil.com` for a host that was
+    never part of the authority, the exact "wrong identity" failure this
+    module exists to prevent. The candidate is still discarded unless its
+    recovered host contains a `.` — an ordinary path segment the same split
+    can catch instead (an npm-style `@scope`, a bare word) usually lacks one —
+    which closes most of the false-match surface against a hand-edited,
+    host-less `owns_remotes` glob. A wrong guess that still gets through only
+    costs a spurious claim or refusal, never a mis-selected identity — a
+    remote's owner never chooses which profile acts. Every message below
+    reports whichever form actually produced the match, never the unrecovered
+    `norm`, so a raised exception cannot repeat a userinfo fragment
+    `_authority` was written specifically to keep out of a message.
 
     ponytail: a genuinely dotless real host (a single-label internal git
     server, a VPN short name) immediately followed by a path segment
@@ -357,11 +351,13 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
         if s.endswith(".git"):
             s = s[:-4]
         parts = _authority(s)
-        if parts and "@" in parts[2].lstrip("/").split("/", 1)[0]:
-            recovered = _strip_to_scheme_and_last_at(remote).rstrip("/").lower()
-            if recovered != norm and "." in recovered.split("/", 1)[0]:
-                best = _owner_matches(recovered, profiles)
-                matched = recovered
+        if parts:
+            after_leading_slash = parts[2].lstrip("/")
+            if "@" in after_leading_slash.split("/", 1)[0]:
+                recovered = after_leading_slash.partition("@")[2].rstrip("/").lower()
+                if recovered != norm and "." in recovered.split("/", 1)[0]:
+                    best = _owner_matches(recovered, profiles)
+                    matched = recovered
     if not best:
         return None
     top = max(best.values())

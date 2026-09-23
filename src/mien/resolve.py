@@ -204,6 +204,20 @@ def _authority(url: str) -> tuple[str, str, str] | None:
     return u.netloc.rpartition("@")[0], u.hostname or "", u.path
 
 
+def _strip_to_scheme_and_last_at(url: str) -> str:
+    """``url``, whitespace and a trailing ``.git`` gone, with everything up to
+    and including its *last* ``@`` after the scheme discarded too.
+
+    Shared by `normalize_remote`'s unparseable-authority fallback and
+    `resolve_remote_profile`'s recovery candidate, which both need exactly
+    this reduction — one path length would otherwise drift from the other.
+    """
+    s = url.strip()
+    if s.endswith(".git"):
+        s = s[:-4]
+    return s.partition("://")[2].rpartition("@")[2]
+
+
 def normalize_remote(url: str) -> str:
     """Reduce a git remote URL to a canonical, lower-cased ``host/path``.
 
@@ -231,7 +245,7 @@ def normalize_remote(url: str) -> str:
     if "://" in s:
         parts = _authority(s)
         # host + path drops the scheme, any `user@` and any `:port` at once.
-        s = parts[1] + parts[2] if parts else s.partition("://")[2].rpartition("@")[2]
+        s = parts[1] + parts[2] if parts else _strip_to_scheme_and_last_at(url)
     elif re.match(r"^[^/]+@[^:/]+:", s):                   # scp-like git@host:path
         s = re.sub(r"^[^@]+@", "", s).replace(":", "/", 1)
     return s.rstrip("/").lower()
@@ -338,10 +352,7 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     # spurious claim or refusal -- remote ownership never selects which
     # profile acts, only gates a display/veto -- never a mis-issued identity.
     if not best and "://" in remote and "." not in norm.split("/", 1)[0]:
-        recovered = remote.strip()
-        if recovered.endswith(".git"):
-            recovered = recovered[:-4]
-        recovered = recovered.partition("://")[2].rpartition("@")[2].rstrip("/").lower()
+        recovered = _strip_to_scheme_and_last_at(remote).rstrip("/").lower()
         if recovered != norm and "." in recovered.split("/", 1)[0]:
             best = _owner_matches(recovered, profiles)
             matched = recovered

@@ -302,26 +302,37 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     docstring), but here it can be tested against the *configured* owners
     instead of trusted blind: tried only on an empty first result, so it can
     recover a real owner `normalize_remote`'s ambiguity hid, but can never
-    override or outrank a match the ordinary normalization already found. A
-    wrong guess still only costs a spurious claim or refusal, never a
-    mis-selected identity — a remote's owner never chooses which profile acts.
+    override or outrank a match the ordinary normalization already found. The
+    candidate is also discarded unless its recovered host contains a `.` —
+    the shape this recovers always truncated a real, dotted hostname, while
+    an ordinary path segment the same split can catch instead (an npm-style
+    `@scope`, a bare word) usually is not one; requiring a dot costs nothing
+    against the real bug and closes most of the false-match surface against a
+    hand-edited, host-less `owns_remotes` glob. A wrong guess that still gets
+    through only costs a spurious claim or refusal, never a mis-selected
+    identity — a remote's owner never chooses which profile acts. Every
+    message below reports whichever form actually produced the match, never
+    the unrecovered `norm`, so a raised exception cannot repeat a userinfo
+    fragment `_authority` was written specifically to keep out of a message.
     """
     norm = normalize_remote(remote)
     best = _owner_matches(norm, profiles)
+    matched = norm
     if not best and "://" in remote:
         recovered = remote.strip()
         if recovered.endswith(".git"):
             recovered = recovered[:-4]
         recovered = recovered.partition("://")[2].rpartition("@")[2].rstrip("/").lower()
-        if recovered != norm:
+        if recovered != norm and "." in recovered.split("/", 1)[0]:
             best = _owner_matches(recovered, profiles)
+            matched = recovered
     if not best:
         return None
     top = max(best.values())
     winners = sorted(n for n, s in best.items() if s == top)
     if len(winners) > 1:
         raise AmbiguousScope(
-            f"remote {norm!r} is claimed with equal specificity by: "
+            f"remote {matched!r} is claimed with equal specificity by: "
             f"{', '.join(winners)}. Narrow one of their owns_remotes globs."
         )
     return winners[0]

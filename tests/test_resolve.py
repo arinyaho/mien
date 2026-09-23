@@ -177,6 +177,23 @@ class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
         assert resolve_remote_profile(
             ps, "https://user/pass@github.com/acme/repo") is None
 
+    def test_a_host_less_glob_is_not_spuriously_matched_by_the_recovery(self):
+        # A legitimate '@'-in-path remote recovers to a host-less candidate
+        # ("company/repo"); that must not match a hand-edited, host-less
+        # owns_remotes glob someone happened to write as "company/repo".
+        ps = profiles(rprof("work", "company/repo"))
+        assert resolve_remote_profile(ps, "https://github.com/user@company/repo") is None
+
+    def test_an_ambiguous_scope_error_never_repeats_the_userinfo_fragment(self):
+        # A tie found through the recovery path must report the recovered,
+        # credential-free form -- never the unrecovered `norm`, which still
+        # carries the userinfo fragment _authority exists to keep out of a
+        # message (see its docstring).
+        ps = profiles(rprof("a", "github.com/acme"), rprof("b", "github.com/acme"))
+        with pytest.raises(AmbiguousScope) as exc:
+            resolve_remote_profile(ps, "https://user/pass@github.com/acme/repo")
+        assert "user" not in str(exc.value) and "pass" not in str(exc.value)
+
 
 class TestResolveRemoteProfile:
     def test_matches_the_owning_profile(self):

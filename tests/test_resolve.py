@@ -178,6 +178,15 @@ class TestRemoteAuthorityIsAmbiguous:
             "https://work/sekrit/more@github.com/acme/repo")
         assert remote_authority_is_ambiguous("https://github.com/acme/x@v2")
 
+    def test_flags_an_unencoded_question_mark_or_hash_in_the_password_too(self):
+        # `urlsplit` truncates the authority at the first of '/', '?' or
+        # '#' -- an unencoded '?' or '#' in the password truncates exactly
+        # like the documented '/' case, but leaves the leftover '@host/...'
+        # in the query or fragment string instead of the path, invisible
+        # to a path-only scan.
+        assert remote_authority_is_ambiguous("https://user?real@host.com/repo")
+        assert remote_authority_is_ambiguous("https://user#real@host.com/repo")
+
     def test_does_not_flag_an_ordinary_remote(self):
         assert not remote_authority_is_ambiguous("https://github.com/acme/x")
 

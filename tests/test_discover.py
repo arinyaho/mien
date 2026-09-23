@@ -284,6 +284,24 @@ def test_discover_remotes_keeps_a_malformed_credential_out_of_the_owner(tmp_path
         ("remote", "github.com/acme")]
 
 
+def test_own_conflict_check_reports_no_claim_for_an_ambiguous_remote():
+    """`--own`'s conflict check (`_remote_claimed_by`) goes through
+    `resolve_remote_profile`, which declines to match ANY remote whose
+    authority can't be confidently parsed -- even one a profile's
+    owns_remotes glob would otherwise match, since the parsed host itself
+    can't be fully trusted for that shape (see resolve_remote_profile's
+    docstring). This costs a missed conflict warning here in exchange for
+    never handing mien exec's veto a confident guess to trust; a `--own`
+    conflict this misses is caught by the discover report's own "already
+    claimed" listing derived from normalize_remote instead, which is
+    unaffected (see test_discover_remotes_keeps_a_malformed_credential_out_
+    of_the_owner)."""
+    from mien.discover import _remote_claimed_by
+
+    profiles = {"work": Profile(name="work", owns_remotes=["github.com/acme"])}
+    assert _remote_claimed_by(profiles, "https://user/pass@github.com/acme/x") is None
+
+
 def test_discover_remotes_skips_a_local_path_remote(tmp_path):
     """A local path has no host and no owner, so its leading directories are not
     a claimable owner — `--own /home` would claim every local remote here."""

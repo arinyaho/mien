@@ -316,42 +316,49 @@ def remote_authority_is_ambiguous(remote: str) -> bool:
     not knowing, and guessing either way risks the failure this exists to
     prevent.
 
-    Checks the whole path for a leftover `@`, not only its first segment: a
-    truncated userinfo can itself contain more than one unencoded `/` before
-    its own `@` (`https://work/sekrit/more@github.com/...`), which would
-    otherwise leave this returning False for a shape every bit as
-    unparseable as the single-slash case. Scanning only the first segment
-    was the right trade-off for the old guessing design — a missed
-    detection there just meant "no match", the same safe direction as an
-    ordinary unowned remote. It is the wrong trade-off here: a missed
-    detection now means `refusal_reason` silently *allows* the handover for
-    a genuinely unparseable origin, the opposite of what this function
-    exists to prevent. There is no corresponding downside to scanning
-    further: unlike the old recovery guess, this never names an owner, so a
-    broader match only ever costs a spurious refusal, never a
-    misattribution — the same accepted direction as every other case here.
+    Checks everything after the parsed netloc, not only `_authority`'s
+    `path` field: `urlsplit` truncates the authority at the first of `/`,
+    `?` *or* `#`, so an unencoded `?` or `#` in the password truncates it
+    exactly like the documented `/` case, but leaves the leftover `@host/...`
+    in the query or fragment string instead of the path —
+    `https://user?real@host.com/repo` parses to `path=''`, `query=
+    'real@host.com/repo'`, invisible to a path-only scan. Checking the whole
+    remainder after the netloc, however `urlsplit` chose to split it,
+    catches all three. Scanning only the first path segment was the right
+    trade-off for the old guessing design — a missed detection there just
+    meant "no match", the same safe direction as an ordinary unowned
+    remote. It is the wrong trade-off here: a missed detection now means
+    `refusal_reason` silently *allows* the handover for a genuinely
+    unparseable origin, the opposite of what this function exists to
+    prevent. There is no corresponding downside to scanning further: unlike
+    the old recovery guess, this never names an owner, so a broader match
+    only ever costs a spurious refusal, never a misattribution — the same
+    accepted direction as every other case here.
 
-    Also true whenever `_authority` itself returns `None` — an unencoded `/`
-    *with* a `:` in the password, an NFKC-unstable netloc, a stray `]`. This
-    is the shape `_authority`'s docstring calls the more clearly unparseable
-    of the two: `normalize_remote`'s own fallback for it is a blind
-    "strip to the last `@`" guess, safe only for *display*, exactly like the
-    successful-but-ambiguous parse above. Without this, `claimed_profile`
-    could hand `refusal_reason` a confident-looking claim built on that same
-    blind guess, and a request matching the guess would slip through before
-    the ambiguity check is ever reached — the exact "a guess wins" failure
-    this refusal exists to prevent, just reached through the other branch of
-    `_authority` instead.
+    Also true whenever the netloc itself can't be parsed at all — an
+    unencoded `/` *with* a `:` in the password, an NFKC-unstable netloc, a
+    stray `]` (see `_authority`'s docstring). This is the shape `_authority`
+    calls the more clearly unparseable of the two: `normalize_remote`'s own
+    fallback for it is a blind "strip to the last `@`" guess, safe only for
+    *display*, exactly like the successful-but-ambiguous parse above.
+    Without this, `claimed_profile` could hand `refusal_reason` a
+    confident-looking claim built on that same blind guess, and a request
+    matching the guess would slip through before the ambiguity check is
+    ever reached — the exact "a guess wins" failure this refusal exists to
+    prevent, just reached through the unparseable branch instead.
     """
     if "://" not in remote:
         return False
     s = remote.strip()
     if s.endswith(".git"):
         s = s[:-4]
-    parts = _authority(s)
-    if not parts:
+    after_scheme = s.partition("://")[2]
+    try:
+        u = urlsplit(s)
+        u.port
+    except ValueError:
         return True
-    return "@" in parts[2].lstrip("/")
+    return "@" in after_scheme[len(u.netloc):]
 
 
 def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | None:

@@ -44,14 +44,15 @@ repository, no remote, an unreadable config, an unexpected exception anywhere
 in here — all allow the handover; a bug in a safety check must cost a missed
 refusal, never a wedged workflow. The one exception is an `origin` whose
 authority cannot be confidently parsed at all (`resolve.remote_authority_is_
-ambiguous` — a password with an unencoded `/` and no `:`, indistinguishable
-from a legitimate path starting with `@`): several attempts to *guess* the
-real owner from that shape each turned out to misattribute an unrelated,
-untruncated remote to the wrong owner about as often as they recovered a
-truncated one, so there is no guess safe enough to fail open on here. This is
-still a refusal, never a selection — an ambiguous origin blocks a *named*
-mismatch, it does not choose one — so the asymmetry this module depends on
-(a crafted origin costs at worst a false refusal, never a mis-action) holds.
+ambiguous` — a password with an unencoded `/`, `?` or `#`, indistinguishable
+from a legitimate path, query, or fragment that happens to contain an `@`
+anywhere): several attempts to *guess* the real owner from that shape each
+turned out to misattribute an unrelated, untruncated remote to the wrong
+owner about as often as they recovered a truncated one, so there is no guess
+safe enough to fail open on here. This is still a refusal, never a selection
+— an ambiguous origin blocks a *named* mismatch, it does not choose one — so
+the asymmetry this module depends on (a crafted origin costs at worst a false
+refusal, never a mis-action) holds.
 """
 
 from __future__ import annotations

@@ -191,6 +191,16 @@ class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
         ps = profiles(rprof("work", "bar/repo"))
         assert resolve_remote_profile(ps, "https://gitserver/foo@bar/repo") is None
 
+    def test_a_dotted_truncated_username_still_recovers_the_real_owner(self):
+        # A real username can itself contain a dot (firstname.lastname);
+        # the guard that gates recovery must not mistake that for "this
+        # host was never truncated" -- the leftover '@' right after the
+        # leading path segment is what matters, not whether that segment
+        # happens to contain a dot.
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(
+            ps, "https://firstname.lastname/pass@github.com/acme/repo") == "work"
+
     def test_a_dotted_path_fragment_is_not_mistaken_for_a_truncated_host(self):
         # The ordinary host here (`github.com`) parsed in full -- it was
         # never truncated -- so a dot elsewhere in the path (an issue

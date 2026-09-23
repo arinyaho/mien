@@ -316,46 +316,52 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     docstring), but here it can be tested against the *configured* owners
     instead of trusted blind: tried only on an empty first result, so it can
     recover a real owner `normalize_remote`'s ambiguity hid, but can never
-    override or outrank a match the ordinary normalization already found. The
-    candidate is also discarded unless its recovered host contains a `.` —
-    the shape this recovers always truncated a real, dotted hostname, while
+    override or outrank a match the ordinary normalization already found.
+
+    The retry is gated on the exact shape `_authority`'s own docstring names —
+    a successful parse whose path starts with a segment containing `@`, the
+    telltale sign the authority was truncated early and the real boundary is
+    still ahead, behind that leftover `@`. Checking dots on the *ordinary*
+    host instead (an earlier version of this guard did) tests the wrong
+    string: in the truncated shape that "host" is the truncated userinfo, not
+    a host, and a real username containing a dot (`firstname.lastname`) made
+    that version skip recovery for the exact bug this exists to catch. The
+    candidate is still discarded unless its *recovered* host contains a `.` —
     an ordinary path segment the same split can catch instead (an npm-style
-    `@scope`, a bare word) usually is not one; requiring a dot costs nothing
-    against the real bug and closes most of the false-match surface against a
-    hand-edited, host-less `owns_remotes` glob. A wrong guess that still gets
-    through only costs a spurious claim or refusal, never a mis-selected
-    identity — a remote's owner never chooses which profile acts. Every
-    message below reports whichever form actually produced the match, never
-    the unrecovered `norm`, so a raised exception cannot repeat a userinfo
-    fragment `_authority` was written specifically to keep out of a message.
+    `@scope`, a bare word) usually lacks one — which closes most of the
+    false-match surface against a hand-edited, host-less `owns_remotes` glob.
+    A wrong guess that still gets through only costs a spurious claim or
+    refusal, never a mis-selected identity — a remote's owner never chooses
+    which profile acts. Every message below reports whichever form actually
+    produced the match, never the unrecovered `norm`, so a raised exception
+    cannot repeat a userinfo fragment `_authority` was written specifically to
+    keep out of a message.
+
+    ponytail: a genuinely dotless real host (a single-label internal git
+    server, a VPN short name) immediately followed by a path segment
+    containing `@` parses identically to a truncated userinfo —
+    `https://gitserver/foo@bar.corp/baz` is indistinguishable from
+    `https://user/pass@github.com/owner/repo` by shape alone, and there is no
+    syntactic fix short of asking the remote (the same irreducible ambiguity
+    `_authority`'s own docstring names). Left as is: the recovery can rarely
+    fire for such a remote whose path happens to contain a matching
+    `@`-delimited, dotted fragment, but the failure is bounded the same way
+    as everywhere else in this module — a spurious claim or refusal, never a
+    mis-issued identity.
     """
     norm = normalize_remote(remote)
     best = _owner_matches(norm, profiles)
     matched = norm
-    # Only worth a second guess when the ordinary host itself looks
-    # truncated (no `.`, unlike a real registered hostname) -- a URL whose
-    # authority parsed in full, dotted host and all, was never the shape
-    # this recovers, no matter what its path happens to contain (an issue
-    # number, an npm-style @scope): trying it there is how the recovery
-    # itself came to spuriously match `.../bar@issue.42` in review.
-    #
-    # ponytail: a genuinely dotless host (a single-label internal git
-    # server, a VPN short name) is the same shape `urlsplit` produces for a
-    # truncated userinfo -- `https://gitserver/foo@bar.corp/baz` parses
-    # identically to `https://user/pass@github.com/owner/repo`, single-label
-    # netloc then an `@` in the next path segment, with no syntactic feature
-    # to tell them apart (same irreducible ambiguity `_authority`'s own
-    # docstring names; there is no fix short of asking the remote). Left as
-    # is: the recovery can rarely fire for a legitimate dotless-host remote
-    # whose path happens to contain a matching `@`-delimited, dotted
-    # fragment, but as elsewhere in this module the failure is bounded to a
-    # spurious claim or refusal -- remote ownership never selects which
-    # profile acts, only gates a display/veto -- never a mis-issued identity.
-    if not best and "://" in remote and "." not in norm.split("/", 1)[0]:
-        recovered = _strip_to_scheme_and_last_at(remote).rstrip("/").lower()
-        if recovered != norm and "." in recovered.split("/", 1)[0]:
-            best = _owner_matches(recovered, profiles)
-            matched = recovered
+    if not best and "://" in remote:
+        s = remote.strip()
+        if s.endswith(".git"):
+            s = s[:-4]
+        parts = _authority(s)
+        if parts and "@" in parts[2].lstrip("/").split("/", 1)[0]:
+            recovered = _strip_to_scheme_and_last_at(remote).rstrip("/").lower()
+            if recovered != norm and "." in recovered.split("/", 1)[0]:
+                best = _owner_matches(recovered, profiles)
+                matched = recovered
     if not best:
         return None
     top = max(best.values())

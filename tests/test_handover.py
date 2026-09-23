@@ -162,6 +162,20 @@ class TestRefusalReason:
         )
         assert reason is not None
 
+    def test_refuses_even_when_the_unparseable_guess_matches_the_requested_profile(self):
+        """_authority returning None (an unencoded '/' plus a ':' in the
+        password) is the more clearly unparseable shape; normalize_remote's
+        own fallback for it is a blind guess that can coincidentally equal
+        the requested profile's own owns_remotes glob. If claimed_profile
+        trusted that guess, `claimed == requested` would short-circuit
+        before the ambiguity check is ever reached -- this must still
+        refuse."""
+        reason = refusal_reason(
+            _owns_remotes(work=["github.com/acme/*"], personal=[]), "/flat/api", "work",
+            remote="https://user:pass/more@github.com/acme/api", agent_driven=True,
+        )
+        assert reason is not None
+
     def test_allows_a_human_against_an_ambiguous_origin(self):
         assert refusal_reason(
             _owns_remotes(work=["github.com/acme/*"]), "/flat/api", "personal",

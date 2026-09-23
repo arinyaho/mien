@@ -330,6 +330,18 @@ def remote_authority_is_ambiguous(remote: str) -> bool:
     further: unlike the old recovery guess, this never names an owner, so a
     broader match only ever costs a spurious refusal, never a
     misattribution — the same accepted direction as every other case here.
+
+    Also true whenever `_authority` itself returns `None` — an unencoded `/`
+    *with* a `:` in the password, an NFKC-unstable netloc, a stray `]`. This
+    is the shape `_authority`'s docstring calls the more clearly unparseable
+    of the two: `normalize_remote`'s own fallback for it is a blind
+    "strip to the last `@`" guess, safe only for *display*, exactly like the
+    successful-but-ambiguous parse above. Without this, `claimed_profile`
+    could hand `refusal_reason` a confident-looking claim built on that same
+    blind guess, and a request matching the guess would slip through before
+    the ambiguity check is ever reached — the exact "a guess wins" failure
+    this refusal exists to prevent, just reached through the other branch of
+    `_authority` instead.
     """
     if "://" not in remote:
         return False
@@ -338,7 +350,7 @@ def remote_authority_is_ambiguous(remote: str) -> bool:
         s = s[:-4]
     parts = _authority(s)
     if not parts:
-        return False
+        return True
     return "@" in parts[2].lstrip("/")
 
 
@@ -353,11 +365,22 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
 
     Never guesses at a truncated or otherwise unparseable authority — see
     `normalize_remote`'s docstring and `remote_authority_is_ambiguous` for
-    why: this can only report `None` for that shape, exactly as if nothing
-    claimed it. A caller that must not silently misattribute a repository to
-    the wrong owner — `mien exec`'s origin-owner veto — checks
-    `remote_authority_is_ambiguous` itself instead of relying on a guess here.
+    why: this reports `None` for that whole shape, exactly as if nothing
+    claimed it, even where `normalize_remote` did parse a host. A host
+    `_authority` parsed successfully still can't be fully trusted when the
+    surrounding shape is ambiguous — the same truncated-userinfo shape can
+    *look* like a normal dotted host (`firstname.lastname`, or in principle
+    `github.com` itself, followed by its own truncated password) — so this
+    caller, which every profile's confident claim ultimately flows through
+    (`claimed_profile`, and from there `mien exec`'s origin-owner veto),
+    treats the whole shape as unresolved rather than trusting a parse that
+    might itself be the truncated fragment. A caller that only ever
+    *displays* a claim can lose a little precision here in exchange for
+    never handing `refusal_reason` a confident-looking guess to skip its
+    own ambiguity check with.
     """
+    if remote_authority_is_ambiguous(remote):
+        return None
     norm = normalize_remote(remote)
     best = _owner_matches(norm, profiles)
     if not best:

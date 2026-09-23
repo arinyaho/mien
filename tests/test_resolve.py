@@ -204,13 +204,31 @@ class TestOwnerMatchNeverGuessesAtAnUnencodedSlashInUserinfo:
             ps, "/x/y", remote="https://user/pass@github.com/acme/repo")
         assert (name, source) == (None, None)
 
-    def test_an_ordinary_match_is_unaffected(self):
+    def test_a_remote_with_no_at_sign_at_all_is_unaffected(self):
         ps = profiles(rprof("work", "github.com/acme"))
-        assert resolve_remote_profile(ps, "https://github.com/acme/x@v2") == "work"
+        assert resolve_remote_profile(ps, "https://github.com/acme/x") == "work"
+
+    def test_an_at_sign_anywhere_in_the_path_also_reports_no_match(self):
+        # Even a host _authority parsed without error can't be fully
+        # trusted once the shape is ambiguous -- the same truncation shape
+        # can in principle look like a normal dotted host too. This costs
+        # a little precision here (github.com/acme really is the parsed
+        # host) in exchange for never handing refusal_reason a
+        # confident-looking guess to skip its own ambiguity check with.
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(ps, "https://github.com/acme/x@v2") is None
 
     def test_a_legitimate_at_sign_in_the_path_does_not_spuriously_match_either(self):
         ps = profiles(rprof("work", "company/repo"))
         assert resolve_remote_profile(ps, "https://github.com/user@company/repo") is None
+
+    def test_an_unparseable_authority_also_reports_no_match(self):
+        # _authority returning None (a password with an unencoded '/' and a
+        # ':') is the more clearly unparseable shape; normalize_remote's own
+        # fallback for it is a blind guess, so this must not trust it either.
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(
+            ps, "https://user:pass/more@github.com/acme/api") is None
 
 
 class TestResolveRemoteProfile:

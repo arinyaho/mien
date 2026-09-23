@@ -3,6 +3,7 @@ import pytest
 from mien.config import AtlassianService, GitHubService, GoogleService, Profile
 from mien.resolve import (AmbiguousScope, claimed_profile, expand_scope,
                           match_base, normalize_remote, profile_for_email,
+                          remote_authority_is_ambiguous,
                           remote_embeds_credential, resolve_profile,
                           resolve_remote_profile)
 
@@ -143,108 +144,59 @@ class TestNormalizeRemote:
             "user/pass@github.com/acme/x"
 
 
-class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
-    """A malformed-but-parseable `origin` must never make a real owner
-    invisible to matching — the origin-owner veto's stated safety property is
-    that it can only false-refuse, never miss a real owner."""
+class TestRemoteAuthorityIsAmbiguous:
+    """This never guesses an owner -- it only flags the shape as unresolved,
+    so a caller that must not misattribute a repository (the origin-owner
+    veto) can refuse instead of silently guessing either direction wrong."""
 
-    def test_resolve_remote_profile_still_matches_the_owner(self):
+    def test_flags_an_unencoded_slash_with_no_colon_in_the_password(self):
+        assert remote_authority_is_ambiguous("https://user/pass@github.com/acme/x")
+
+    def test_flags_it_regardless_of_a_dot_in_the_truncated_userinfo(self):
+        # A real username can itself contain a dot (firstname.lastname);
+        # this must not be mistaken for "the host was never truncated".
+        assert remote_authority_is_ambiguous(
+            "https://firstname.lastname/pass@github.com/acme/repo")
+
+    def test_flags_a_legitimate_at_sign_in_the_path_too(self):
+        # Indistinguishable from truncation by shape alone -- this is
+        # exactly why nothing may guess an owner from it either way.
+        assert remote_authority_is_ambiguous("https://github.com/user@company/repo")
+
+    def test_does_not_flag_an_ordinary_remote(self):
+        assert not remote_authority_is_ambiguous("https://github.com/acme/x")
+        assert not remote_authority_is_ambiguous("https://github.com/acme/x@v2")
+
+    def test_does_not_flag_a_non_url_remote(self):
+        assert not remote_authority_is_ambiguous("/srv/git/repo")
+        assert not remote_authority_is_ambiguous("git@github.com:acme/x.git")
+
+
+class TestOwnerMatchNeverGuessesAtAnUnencodedSlashInUserinfo:
+    """The malformed-but-parseable shape `remote_authority_is_ambiguous`
+    flags is never guessed at here: `resolve_remote_profile`/`claimed_profile`
+    report exactly as if nothing claims it, same as any other remote no
+    profile owns. A caller that must not silently misattribute a repository
+    checks the ambiguity itself instead (see test_handover.py)."""
+
+    def test_resolve_remote_profile_reports_no_match(self):
         ps = profiles(rprof("work", "github.com/acme"))
-        assert resolve_remote_profile(
-            ps, "https://user/pass@github.com/acme/repo") == "work"
-
-    def test_claimed_profile_still_names_the_remote_owner(self):
-        ps = {"work": Profile(name="work", owns_remotes=["github.com/acme"])}
-        name, source = claimed_profile(
-            ps, "/x/y", remote="https://user/pass@github.com/acme/repo")
-        assert (name, source) == ("work", "repo")
-
-    def test_an_ordinary_match_is_never_overridden_by_the_recovery_candidate(self):
-        # The '@'-in-path shape recovery only fires when the plain
-        # normalization matches nothing; a real match always wins outright.
-        ps = profiles(rprof("work", "github.com/acme"))
-        assert resolve_remote_profile(ps, "https://github.com/acme/x@v2") == "work"
-
-    def test_a_legitimate_at_sign_in_the_path_does_not_spuriously_match(self):
-        # `github.com/user@company/repo` parses cleanly (no truncation); the
-        # recovery candidate for it is `company/repo`, which must not claim
-        # an owner that was never configured for `github.com`.
-        ps = profiles(rprof("work", "github.com/acme"))
-        assert resolve_remote_profile(ps, "https://github.com/user@company/repo") is None
-
-    def test_no_owner_still_returns_none_for_the_malformed_shape(self):
-        ps = profiles(rprof("work", "github.com/someone-else"))
         assert resolve_remote_profile(
             ps, "https://user/pass@github.com/acme/repo") is None
 
-    def test_a_host_less_recovered_candidate_is_rejected_even_with_a_real_host(self):
-        # The leading path segment ("user@company") does contain '@', so the
-        # recovery branch is entered and produces the candidate "company/repo"
-        # -- but that candidate's own leading segment ("company") has no dot,
-        # so the recovered-host dot check rejects it before _owner_matches
-        # ever runs, regardless of what the *ordinary* host looked like.
+    def test_claimed_profile_reports_no_remote_claim(self):
+        ps = {"work": Profile(name="work", owns_remotes=["github.com/acme"])}
+        name, source = claimed_profile(
+            ps, "/x/y", remote="https://user/pass@github.com/acme/repo")
+        assert (name, source) == (None, None)
+
+    def test_an_ordinary_match_is_unaffected(self):
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(ps, "https://github.com/acme/x@v2") == "work"
+
+    def test_a_legitimate_at_sign_in_the_path_does_not_spuriously_match_either(self):
         ps = profiles(rprof("work", "company/repo"))
         assert resolve_remote_profile(ps, "https://github.com/user@company/repo") is None
-
-    def test_a_host_less_glob_is_not_spuriously_matched_by_the_recovery(self):
-        # A dotless recovered candidate ("bar/repo") must not match a
-        # hand-edited, host-less owns_remotes glob even though the glob
-        # itself would fnmatch it -- the recovered-host dot check rejects
-        # the candidate before _owner_matches is ever called.
-        ps = profiles(rprof("work", "bar/repo"))
-        assert resolve_remote_profile(ps, "https://gitserver/foo@bar/repo") is None
-
-    def test_a_dotted_truncated_username_still_recovers_the_real_owner(self):
-        # A real username can itself contain a dot (firstname.lastname);
-        # the guard that gates recovery must not mistake that for "this
-        # host was never truncated" -- the leftover '@' right after the
-        # leading path segment is what matters, not whether that segment
-        # happens to contain a dot.
-        ps = profiles(rprof("work", "github.com/acme"))
-        assert resolve_remote_profile(
-            ps, "https://firstname.lastname/pass@github.com/acme/repo") == "work"
-
-    def test_a_dotted_path_fragment_is_not_mistaken_for_a_truncated_host(self):
-        # The ordinary host here (`github.com`) parsed in full -- it was
-        # never truncated -- so a dot elsewhere in the path (an issue
-        # number, not a host) must not trigger the recovery at all.
-        ps = profiles(rprof("work", "issue.42"))
-        assert resolve_remote_profile(ps, "https://github.com/foo/bar@issue.42") is None
-
-    def test_an_ambiguous_scope_error_never_repeats_the_userinfo_fragment(self):
-        # A tie found through the recovery path must report the recovered,
-        # credential-free form -- never the unrecovered `norm`, which still
-        # carries the userinfo fragment _authority exists to keep out of a
-        # message (see its docstring).
-        ps = profiles(rprof("a", "github.com/acme"), rprof("b", "github.com/acme"))
-        with pytest.raises(AmbiguousScope) as exc:
-            resolve_remote_profile(ps, "https://user/pass@github.com/acme/repo")
-        assert "user" not in str(exc.value) and "pass" not in str(exc.value)
-
-    def test_a_second_at_sign_deeper_in_the_path_never_claims_the_wrong_owner(self):
-        # The recovery boundary is the FIRST '@' after the truncation point,
-        # not the last '@' anywhere in the URL: using the last one would
-        # recover "evil.com/repo" here and falsely claim a host that was
-        # never part of the authority -- the "wrong identity" failure this
-        # module exists to prevent. The correctly-recovered candidate
-        # ("host.com/owner@evil.com/repo") is unusual enough that it need
-        # not match the real owner's plain glob either; not claiming an
-        # owner nobody configured is the property this asserts.
-        unrelated_host = profiles(rprof("evil", "evil.com/repo"))
-        assert resolve_remote_profile(
-            unrelated_host, "https://user/pass@host.com/owner@evil.com/repo") is None
-
-    def test_a_truncated_userinfo_with_more_than_one_slash_goes_unrecovered(self):
-        # Documents the accepted boundary, not a bug: only the first path
-        # segment is checked for the leftover '@', so a truncated userinfo
-        # containing a second unencoded '/' before its own '@' isn't
-        # recovered. Scanning every segment would fix this at the cost of
-        # reopening the exact ponytail ambiguity below for an ordinary path
-        # whose second segment happens to contain '@' -- no fixed scan depth
-        # is safe in both directions.
-        ps = profiles(rprof("work", "github.com/acme"))
-        assert resolve_remote_profile(
-            ps, "https://work/sekrit/more@github.com/acme/repo") is None
 
 
 class TestResolveRemoteProfile:

@@ -39,10 +39,19 @@ only remaining advice would be to act as an identity the user did not bind this
 workspace to. An *unapproved* `.mien` carries none of that weight and is not
 passed in: approval is what turns a checked-out file into a user's decision.
 
-Fail open, always. Every uncertainty — nothing claims this place, two profiles
-claim it equally, no repository, no remote, an unreadable config, an unexpected
-exception anywhere in here — allows the handover. A bug in a safety check must
-cost a missed refusal, never a wedged workflow.
+Fail open on every uncertainty but one. Two profiles claiming it equally, no
+repository, no remote, an unreadable config, an unexpected exception anywhere
+in here — all allow the handover; a bug in a safety check must cost a missed
+refusal, never a wedged workflow. The one exception is an `origin` whose
+authority cannot be confidently parsed at all (`resolve.remote_authority_is_
+ambiguous` — a password with an unencoded `/` and no `:`, indistinguishable
+from a legitimate path starting with `@`): several attempts to *guess* the
+real owner from that shape each turned out to misattribute an unrelated,
+untruncated remote to the wrong owner about as often as they recovered a
+truncated one, so there is no guess safe enough to fail open on here. This is
+still a refusal, never a selection — an ambiguous origin blocks a *named*
+mismatch, it does not choose one — so the asymmetry this module depends on
+(a crafted origin costs at worst a false refusal, never a mis-action) holds.
 """
 
 from __future__ import annotations
@@ -50,7 +59,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from mien.config import Profile
-from mien.resolve import claimed_profile
+from mien.resolve import claimed_profile, remote_authority_is_ambiguous
 
 
 def _place(claimed: str, source: str | None) -> str:
@@ -86,9 +95,13 @@ def refusal_reason(
     touches no filesystem, touches no backend and spends no credential, so it is
     safe to call before anything is loaded — which is where `exec` calls it.
 
-    Refuses only on a confident, agent-driven mismatch: something claims this
-    place, and it is not the profile that was named. Everything else returns
-    None, including any exception raised inside this function.
+    Refuses on a confident, agent-driven mismatch: something claims this
+    place, and it is not the profile that was named. It also refuses when
+    nothing confidently claims this place but the `origin` remote's own
+    authority could not be confidently parsed at all — see the module
+    docstring's one exception to failing open, and
+    `resolve.remote_authority_is_ambiguous`. Everything else returns None,
+    including any exception raised inside this function.
     """
     try:
         # A person at a terminal is never blocked: they can see where they are,
@@ -105,7 +118,22 @@ def refusal_reason(
             claimed, source = declared, "declaration"
         else:
             claimed, source = claimed_profile(profiles, cwd, remote=remote)
-            if not claimed or claimed == requested:
+            if claimed == requested:
+                return None
+            if not claimed:
+                if remote and remote_authority_is_ambiguous(remote):
+                    return (
+                        f"refusing to hand over credentials: this call asked for "
+                        f"profile {requested!r}, but this repository's origin "
+                        "remote could not be parsed with confidence — it may "
+                        "belong to a different identity, and this agent harness "
+                        "cannot be trusted to have checked.\n"
+                        "  Nothing ran and no credential was loaded — mien "
+                        "declined the handover; the command itself did not "
+                        "fail.\n"
+                        "  Percent-encode a `/` in the remote's password, or run "
+                        f"this by hand if {requested!r} really is right here."
+                    )
                 return None
 
         return (

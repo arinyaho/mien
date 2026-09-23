@@ -287,6 +287,47 @@ def _owner_matches(norm: str, profiles: dict[str, Profile]) -> dict[str, int]:
     return best
 
 
+def remote_authority_is_ambiguous(remote: str) -> bool:
+    """True if `remote`'s authority could not be confidently determined.
+
+    The one shape `_authority`'s own docstring already says has no syntactic
+    resolution: a successful parse whose path starts with a segment
+    containing `@` — indistinguishable from a truncated userinfo (a password
+    with an unencoded `/` and no `:`) *and* from an ordinary, untruncated
+    remote whose path legitimately starts with an `@` segment. Several
+    attempts to guess which one it is — testing a recovered candidate
+    against the configured owners, gating on dots, gating on scan depth —
+    each turned out to have a symmetric counter-example: strict enough to
+    avoid misattributing a real, untruncated remote to the wrong configured
+    owner, and it also misses genuine truncation; loose enough to catch
+    genuine truncation, and it also misattributes an untruncated remote
+    (`https://github.com/foo@bar.com/baz` — a real, complete host — to
+    whoever owns `bar.com/baz`). That is not a narrower, separately fixable
+    gap; it is the same ambiguity in both directions at once.
+
+    So this detects the shape without ever guessing an owner from it: a
+    caller that only ever *displays* a claim (the status line, `mien
+    discover`) can keep matching only what it can already confidently
+    normalize, silently missing this shape exactly as before. A caller that
+    must never silently misattribute one (`mien exec`'s origin-owner veto,
+    via `handover.refusal_reason`) can refuse instead of guessing — which is
+    what "wrong identity is the failure mode that matters" requires here:
+    an unresolvable authority is not evidence of nothing, it is evidence of
+    not knowing, and guessing either way risks the failure this exists to
+    prevent.
+    """
+    if "://" not in remote:
+        return False
+    s = remote.strip()
+    if s.endswith(".git"):
+        s = s[:-4]
+    parts = _authority(s)
+    if not parts:
+        return False
+    after_leading_slash = parts[2].lstrip("/")
+    return "@" in after_leading_slash.split("/", 1)[0]
+
+
 def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | None:
     """Return the profile whose ``owns_remotes`` claims ``remote``, or None.
 
@@ -296,88 +337,22 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     As with directory scopes, the longest matching pattern wins and an exact tie
     raises AmbiguousScope rather than guessing.
 
-    When the ordinary normalization matches nothing, retry with the real
-    host recovered — `normalize_remote` itself cannot risk that guess
-    generally (see its docstring), but here it can be tested against the
-    *configured* owners instead of trusted blind: tried only on an empty
-    first result, so it can recover a real owner `normalize_remote`'s
-    ambiguity hid, but can never override or outrank a match the ordinary
-    normalization already found.
-
-    The retry is gated on the exact shape `_authority`'s own docstring names —
-    a successful parse whose path starts with a segment containing `@`, the
-    telltale sign the authority was truncated early and the real boundary is
-    still ahead, behind that leftover `@`. Checking dots on the *ordinary*
-    host instead (an earlier version of this guard did) tests the wrong
-    string: in the truncated shape that "host" is the truncated userinfo, not
-    a host, and a real username containing a dot (`firstname.lastname`) made
-    that version skip recovery for the exact bug this exists to catch.
-
-    Only the *first* path segment is checked, not the whole path: a
-    truncated userinfo containing more than one unencoded `/` before its own
-    `@` (`https://work/sekrit/more@github.com/...`) leaves that `@` in a
-    later segment and goes unrecovered. Checking every segment instead would
-    fix that at the cost of reopening exactly the ponytail case below in the
-    other direction — an ordinary, un-truncated path that happens to contain
-    `@` two or more segments in (a real second-level `bar@issue.42`-shaped
-    directory) would then wrongly look truncated too. There is no segment
-    count that is safe in both directions at once; this is the same
-    irreducible ambiguity as the ponytail case, extended to however many
-    slashes a truncated userinfo happens to contain, not a narrower,
-    separately fixable gap.
-
-    The recovered candidate is everything after that segment's *first* `@`,
-    not the last `@` anywhere in the URL (an earlier version of this used the
-    same last-`@` strip `normalize_remote`'s blind fallback uses, which is
-    wrong once the truncation point is actually known): a later, unrelated
-    `@` further down the path — `.../owner@evil.com/repo` — would otherwise
-    both miss the real owner and falsely claim `evil.com` for a host that was
-    never part of the authority, the exact "wrong identity" failure this
-    module exists to prevent. The candidate is still discarded unless its
-    recovered host contains a `.` — an ordinary path segment the same split
-    can catch instead (an npm-style `@scope`, a bare word) usually lacks one —
-    which closes most of the false-match surface against a hand-edited,
-    host-less `owns_remotes` glob. A wrong guess that still gets through only
-    costs a spurious claim or refusal, never a mis-selected identity — a
-    remote's owner never chooses which profile acts. Every message below
-    reports whichever form actually produced the match, never the unrecovered
-    `norm`, so a raised exception cannot repeat a userinfo fragment
-    `_authority` was written specifically to keep out of a message.
-
-    ponytail: a genuinely dotless real host (a single-label internal git
-    server, a VPN short name) immediately followed by a path segment
-    containing `@` parses identically to a truncated userinfo —
-    `https://gitserver/foo@bar.corp/baz` is indistinguishable from
-    `https://user/pass@github.com/owner/repo` by shape alone, and there is no
-    syntactic fix short of asking the remote (the same irreducible ambiguity
-    `_authority`'s own docstring names). Left as is: the recovery can rarely
-    fire for such a remote whose path happens to contain a matching
-    `@`-delimited, dotted fragment, but the failure is bounded the same way
-    as everywhere else in this module — a spurious claim or refusal, never a
-    mis-issued identity.
+    Never guesses at a truncated or otherwise unparseable authority — see
+    `normalize_remote`'s docstring and `remote_authority_is_ambiguous` for
+    why: this can only report `None` for that shape, exactly as if nothing
+    claimed it. A caller that must not silently misattribute a repository to
+    the wrong owner — `mien exec`'s origin-owner veto — checks
+    `remote_authority_is_ambiguous` itself instead of relying on a guess here.
     """
     norm = normalize_remote(remote)
     best = _owner_matches(norm, profiles)
-    matched = norm
-    if not best and "://" in remote:
-        s = remote.strip()
-        if s.endswith(".git"):
-            s = s[:-4]
-        parts = _authority(s)
-        if parts:
-            after_leading_slash = parts[2].lstrip("/")
-            if "@" in after_leading_slash.split("/", 1)[0]:
-                recovered = after_leading_slash.partition("@")[2].rstrip("/").lower()
-                if recovered != norm and "." in recovered.split("/", 1)[0]:
-                    best = _owner_matches(recovered, profiles)
-                    matched = recovered
     if not best:
         return None
     top = max(best.values())
     winners = sorted(n for n, s in best.items() if s == top)
     if len(winners) > 1:
         raise AmbiguousScope(
-            f"remote {matched!r} is claimed with equal specificity by: "
+            f"remote {norm!r} is claimed with equal specificity by: "
             f"{', '.join(winners)}. Narrow one of their owns_remotes globs."
         )
     return winners[0]

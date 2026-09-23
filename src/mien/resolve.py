@@ -324,6 +324,19 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     # this recovers, no matter what its path happens to contain (an issue
     # number, an npm-style @scope): trying it there is how the recovery
     # itself came to spuriously match `.../bar@issue.42` in review.
+    #
+    # ponytail: a genuinely dotless host (a single-label internal git
+    # server, a VPN short name) is the same shape `urlsplit` produces for a
+    # truncated userinfo -- `https://gitserver/foo@bar.corp/baz` parses
+    # identically to `https://user/pass@github.com/owner/repo`, single-label
+    # netloc then an `@` in the next path segment, with no syntactic feature
+    # to tell them apart (same irreducible ambiguity `_authority`'s own
+    # docstring names; there is no fix short of asking the remote). Left as
+    # is: the recovery can rarely fire for a legitimate dotless-host remote
+    # whose path happens to contain a matching `@`-delimited, dotted
+    # fragment, but as elsewhere in this module the failure is bounded to a
+    # spurious claim or refusal -- remote ownership never selects which
+    # profile acts, only gates a display/veto -- never a mis-issued identity.
     if not best and "://" in remote and "." not in norm.split("/", 1)[0]:
         recovered = remote.strip()
         if recovered.endswith(".git"):

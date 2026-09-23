@@ -234,6 +234,18 @@ class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
         assert resolve_remote_profile(
             unrelated_host, "https://user/pass@host.com/owner@evil.com/repo") is None
 
+    def test_a_truncated_userinfo_with_more_than_one_slash_goes_unrecovered(self):
+        # Documents the accepted boundary, not a bug: only the first path
+        # segment is checked for the leftover '@', so a truncated userinfo
+        # containing a second unencoded '/' before its own '@' isn't
+        # recovered. Scanning every segment would fix this at the cost of
+        # reopening the exact ponytail ambiguity below for an ordinary path
+        # whose second segment happens to contain '@' -- no fixed scan depth
+        # is safe in both directions.
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(
+            ps, "https://work/sekrit/more@github.com/acme/repo") is None
+
 
 class TestResolveRemoteProfile:
     def test_matches_the_owning_profile(self):

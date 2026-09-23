@@ -313,6 +313,19 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
     a host, and a real username containing a dot (`firstname.lastname`) made
     that version skip recovery for the exact bug this exists to catch.
 
+    Only the *first* path segment is checked, not the whole path: a
+    truncated userinfo containing more than one unencoded `/` before its own
+    `@` (`https://work/sekrit/more@github.com/...`) leaves that `@` in a
+    later segment and goes unrecovered. Checking every segment instead would
+    fix that at the cost of reopening exactly the ponytail case below in the
+    other direction — an ordinary, un-truncated path that happens to contain
+    `@` two or more segments in (a real second-level `bar@issue.42`-shaped
+    directory) would then wrongly look truncated too. There is no segment
+    count that is safe in both directions at once; this is the same
+    irreducible ambiguity as the ponytail case, extended to however many
+    slashes a truncated userinfo happens to contain, not a narrower,
+    separately fixable gap.
+
     The recovered candidate is everything after that segment's *first* `@`,
     not the last `@` anywhere in the URL (an earlier version of this used the
     same last-`@` strip `normalize_remote`'s blind fallback uses, which is

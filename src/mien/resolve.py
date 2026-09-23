@@ -215,28 +215,23 @@ def normalize_remote(url: str) -> str:
     mismatch would be a false *miss* — the status line failing to warn — which is
     the worse direction for a safety signal).
 
-    `_authority`'s own ponytail note names one shape it cannot flag: a password
-    with an unencoded `/` and no `:` parses as a *valid* authority — `user`, not
-    the real host — because no port field is involved to raise. That host is
-    wrong, not absent, so the ``parts`` branch below would fold it straight into
-    the glob callers match `owns_remotes` against, hiding the real owner instead
-    of merely refusing to guess it. The signal that happened: the leftover `@`
-    that belongs to the real authority shows up in the *path*, in the segment
-    right after the leading `/`, which an ordinary `owner/repo` path never
-    contains. Route that case through the same last-`@` fallback already used
-    for a `None` authority.
+    `_authority`'s own ponytail note names a shape this function inherits
+    unresolved: a password with an unencoded `/` and no `:` parses as a
+    *valid* authority — `user`, not the real host — indistinguishable here
+    from a URL whose path legitimately starts with an `@` (an npm-style
+    `@scope` segment, an `owner@host`-shaped path component). Guessing wrong
+    either way is unsafe in a different direction, so this function makes no
+    guess; see `resolve_remote_profile` for how the owner-matching path
+    recovers the real host without guessing, by testing it against the
+    configured owners instead of the raw string.
     """
     s = url.strip()
     if s.endswith(".git"):
         s = s[:-4]
     if "://" in s:
         parts = _authority(s)
-        leaked_authority = parts and "@" in parts[2].lstrip("/").split("/", 1)[0]
-        if parts and not leaked_authority:
-            # host + path drops the scheme, any `user@` and any `:port` at once.
-            s = parts[1] + parts[2]
-        else:
-            s = s.partition("://")[2].rpartition("@")[2]
+        # host + path drops the scheme, any `user@` and any `:port` at once.
+        s = parts[1] + parts[2] if parts else s.partition("://")[2].rpartition("@")[2]
     elif re.match(r"^[^/]+@[^:/]+:", s):                   # scp-like git@host:path
         s = re.sub(r"^[^@]+@", "", s).replace(":", "/", 1)
     return s.rstrip("/").lower()
@@ -280,16 +275,7 @@ def remote_embeds_credential(url: str | None) -> bool:
     return ":" in userinfo or userinfo.startswith(CREDENTIAL_PREFIXES)
 
 
-def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | None:
-    """Return the profile whose ``owns_remotes`` claims ``remote``, or None.
-
-    ``remote`` is normalized (`normalize_remote`) and matched against each
-    profile's globs — both the pattern itself and ``<pattern>/*``, so a bare
-    owner glob (`github.com/arinyaho`) claims the owner and everything under it.
-    As with directory scopes, the longest matching pattern wins and an exact tie
-    raises AmbiguousScope rather than guessing.
-    """
-    norm = normalize_remote(remote)
+def _owner_matches(norm: str, profiles: dict[str, Profile]) -> dict[str, int]:
     best: dict[str, int] = {}
     for name in sorted(profiles):
         for raw in profiles[name].owns_remotes:
@@ -298,6 +284,37 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
                 score = len(pat)
                 if score > best.get(name, -1):
                     best[name] = score
+    return best
+
+
+def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | None:
+    """Return the profile whose ``owns_remotes`` claims ``remote``, or None.
+
+    ``remote`` is normalized (`normalize_remote`) and matched against each
+    profile's globs — both the pattern itself and ``<pattern>/*``, so a bare
+    owner glob (`github.com/arinyaho`) claims the owner and everything under it.
+    As with directory scopes, the longest matching pattern wins and an exact tie
+    raises AmbiguousScope rather than guessing.
+
+    When the ordinary normalization matches nothing, retry against the same
+    last-``@`` recovery `_authority`'s unparseable-authority branch already
+    uses — `normalize_remote` itself cannot risk that guess generally (see its
+    docstring), but here it can be tested against the *configured* owners
+    instead of trusted blind: tried only on an empty first result, so it can
+    recover a real owner `normalize_remote`'s ambiguity hid, but can never
+    override or outrank a match the ordinary normalization already found. A
+    wrong guess still only costs a spurious claim or refusal, never a
+    mis-selected identity — a remote's owner never chooses which profile acts.
+    """
+    norm = normalize_remote(remote)
+    best = _owner_matches(norm, profiles)
+    if not best and "://" in remote:
+        recovered = remote.strip()
+        if recovered.endswith(".git"):
+            recovered = recovered[:-4]
+        recovered = recovered.partition("://")[2].rpartition("@")[2].rstrip("/").lower()
+        if recovered != norm:
+            best = _owner_matches(recovered, profiles)
     if not best:
         return None
     top = max(best.values())

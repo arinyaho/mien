@@ -131,14 +131,16 @@ class TestNormalizeRemote:
         # No host; simply must not crash and must not spuriously match a glob.
         assert normalize_remote("/srv/git/Repo") == "/srv/git/repo"
 
-    def test_an_unencoded_slash_with_no_colon_in_the_password_does_not_hide_the_host(self):
+    def test_an_unencoded_slash_with_no_colon_in_the_password_is_left_unresolved(self):
         """No `:` before the `/` means `.port` never raises, so `_authority`
-        parses `user` as a real host instead of signaling failure. The real
-        host must still surface — not as `user`, and not folded into a glob
-        that can never match an owner."""
-        norm = normalize_remote("https://user/pass@github.com/acme/x.git")
-        assert norm == "github.com/acme/x"
-        assert "user" not in norm and "@" not in norm
+        parses `user` as a real host instead of signaling failure -- and this
+        shape is indistinguishable from a path that legitimately starts with
+        an `@` segment, so normalize_remote makes no guess here. Recovering
+        the real owner for matching happens in resolve_remote_profile, which
+        can test a candidate against the configured owners instead of
+        guessing blind."""
+        assert normalize_remote("https://user/pass@github.com/acme/x.git") == \
+            "user/pass@github.com/acme/x"
 
 
 class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
@@ -156,6 +158,24 @@ class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
         name, source = claimed_profile(
             ps, "/x/y", remote="https://user/pass@github.com/acme/repo")
         assert (name, source) == ("work", "repo")
+
+    def test_an_ordinary_match_is_never_overridden_by_the_recovery_candidate(self):
+        # The '@'-in-path shape recovery only fires when the plain
+        # normalization matches nothing; a real match always wins outright.
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(ps, "https://github.com/acme/x@v2") == "work"
+
+    def test_a_legitimate_at_sign_in_the_path_does_not_spuriously_match(self):
+        # `github.com/user@company/repo` parses cleanly (no truncation); the
+        # recovery candidate for it is `company/repo`, which must not claim
+        # an owner that was never configured for `github.com`.
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(ps, "https://github.com/user@company/repo") is None
+
+    def test_no_owner_still_returns_none_for_the_malformed_shape(self):
+        ps = profiles(rprof("work", "github.com/someone-else"))
+        assert resolve_remote_profile(
+            ps, "https://user/pass@github.com/acme/repo") is None
 
 
 class TestResolveRemoteProfile:

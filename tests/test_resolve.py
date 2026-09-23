@@ -3,6 +3,7 @@ import pytest
 from mien.config import AtlassianService, GitHubService, GoogleService, Profile
 from mien.resolve import (AmbiguousScope, claimed_profile, expand_scope,
                           match_base, normalize_remote, profile_for_email,
+                          remote_authority_is_ambiguous,
                           remote_embeds_credential, resolve_profile,
                           resolve_remote_profile)
 
@@ -130,6 +131,113 @@ class TestNormalizeRemote:
     def test_a_local_path_is_left_as_a_lowercased_string(self):
         # No host; simply must not crash and must not spuriously match a glob.
         assert normalize_remote("/srv/git/Repo") == "/srv/git/repo"
+
+    def test_an_unencoded_slash_with_no_colon_in_the_password_is_left_unresolved(self):
+        """No `:` before the `/` means `.port` never raises, so `_authority`
+        parses `user` as a real host instead of signaling failure -- and this
+        shape is indistinguishable from a path that legitimately starts with
+        an `@` segment, so normalize_remote makes no guess here. Recovering
+        the real owner for matching happens in resolve_remote_profile, which
+        can test a candidate against the configured owners instead of
+        guessing blind."""
+        assert normalize_remote("https://user/pass@github.com/acme/x.git") == \
+            "user/pass@github.com/acme/x"
+
+
+class TestRemoteAuthorityIsAmbiguous:
+    """This never guesses an owner -- it only flags the shape as unresolved,
+    so a caller that must not misattribute a repository (the origin-owner
+    veto) can refuse instead of silently guessing either direction wrong."""
+
+    def test_flags_an_unencoded_slash_with_no_colon_in_the_password(self):
+        assert remote_authority_is_ambiguous("https://user/pass@github.com/acme/x")
+
+    def test_flags_it_regardless_of_a_dot_in_the_truncated_userinfo(self):
+        # A real username can itself contain a dot (firstname.lastname);
+        # this must not be mistaken for "the host was never truncated".
+        assert remote_authority_is_ambiguous(
+            "https://firstname.lastname/pass@github.com/acme/repo")
+
+    def test_flags_a_legitimate_at_sign_in_the_path_too(self):
+        # Indistinguishable from truncation by shape alone -- this is
+        # exactly why nothing may guess an owner from it either way.
+        assert remote_authority_is_ambiguous("https://github.com/user@company/repo")
+
+    def test_flags_an_at_sign_anywhere_in_the_path_not_only_the_first_segment(self):
+        # A truncated userinfo can itself contain more than one unencoded
+        # '/' before its own '@' (https://work/sekrit/more@github.com/...),
+        # which leaves the leftover '@' in a later segment. Scanning only
+        # the first segment was the right trade-off for the old guessing
+        # design (a miss there just meant "no match"); it is the wrong one
+        # here, where a miss means refusal_reason silently allows the
+        # handover for a genuinely unparseable origin. There is no
+        # corresponding false-positive risk to widening this: unlike the
+        # old recovery guess, this never names an owner, so it costs at
+        # most a spurious refusal, never a misattribution.
+        assert remote_authority_is_ambiguous(
+            "https://work/sekrit/more@github.com/acme/repo")
+        assert remote_authority_is_ambiguous("https://github.com/acme/x@v2")
+
+    def test_flags_an_unencoded_question_mark_or_hash_in_the_password_too(self):
+        # `urlsplit` truncates the authority at the first of '/', '?' or
+        # '#' -- an unencoded '?' or '#' in the password truncates exactly
+        # like the documented '/' case, but leaves the leftover '@host/...'
+        # in the query or fragment string instead of the path, invisible
+        # to a path-only scan.
+        assert remote_authority_is_ambiguous("https://user?real@host.com/repo")
+        assert remote_authority_is_ambiguous("https://user#real@host.com/repo")
+
+    def test_does_not_flag_an_ordinary_remote(self):
+        assert not remote_authority_is_ambiguous("https://github.com/acme/x")
+
+    def test_does_not_flag_a_non_url_remote(self):
+        assert not remote_authority_is_ambiguous("/srv/git/repo")
+        assert not remote_authority_is_ambiguous("git@github.com:acme/x.git")
+
+
+class TestOwnerMatchNeverGuessesAtAnUnencodedSlashInUserinfo:
+    """The malformed-but-parseable shape `remote_authority_is_ambiguous`
+    flags is never guessed at here: `resolve_remote_profile`/`claimed_profile`
+    report exactly as if nothing claims it, same as any other remote no
+    profile owns. A caller that must not silently misattribute a repository
+    checks the ambiguity itself instead (see test_handover.py)."""
+
+    def test_resolve_remote_profile_reports_no_match(self):
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(
+            ps, "https://user/pass@github.com/acme/repo") is None
+
+    def test_claimed_profile_reports_no_remote_claim(self):
+        ps = {"work": Profile(name="work", owns_remotes=["github.com/acme"])}
+        name, source = claimed_profile(
+            ps, "/x/y", remote="https://user/pass@github.com/acme/repo")
+        assert (name, source) == (None, None)
+
+    def test_a_remote_with_no_at_sign_at_all_is_unaffected(self):
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(ps, "https://github.com/acme/x") == "work"
+
+    def test_an_at_sign_anywhere_in_the_path_also_reports_no_match(self):
+        # Even a host _authority parsed without error can't be fully
+        # trusted once the shape is ambiguous -- the same truncation shape
+        # can in principle look like a normal dotted host too. This costs
+        # a little precision here (github.com/acme really is the parsed
+        # host) in exchange for never handing refusal_reason a
+        # confident-looking guess to skip its own ambiguity check with.
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(ps, "https://github.com/acme/x@v2") is None
+
+    def test_a_legitimate_at_sign_in_the_path_does_not_spuriously_match_either(self):
+        ps = profiles(rprof("work", "company/repo"))
+        assert resolve_remote_profile(ps, "https://github.com/user@company/repo") is None
+
+    def test_an_unparseable_authority_also_reports_no_match(self):
+        # _authority returning None (a password with an unencoded '/' and a
+        # ':') is the more clearly unparseable shape; normalize_remote's own
+        # fallback for it is a blind guess, so this must not trust it either.
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(
+            ps, "https://user:pass/more@github.com/acme/api") is None
 
 
 class TestResolveRemoteProfile:

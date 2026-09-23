@@ -139,6 +139,70 @@ class TestRefusalReason:
             Broken(), "/flat/api", "personal", remote=ACME_REMOTE, agent_driven=True,
         ) is None
 
+    def test_refuses_an_agent_driven_call_against_an_ambiguous_origin(self):
+        """Nothing confidently claims this place, but the origin's own
+        authority could not be parsed with confidence either -- the one
+        exception to failing open. See resolve.remote_authority_is_ambiguous."""
+        reason = refusal_reason(
+            _owns_remotes(work=["github.com/acme/*"]), "/flat/api", "personal",
+            remote="https://user/pass@github.com/acme/api", agent_driven=True,
+        )
+        assert reason is not None
+        assert "personal" in reason
+        assert "could not be parsed with confidence" in reason
+
+    def test_refuses_a_multi_slash_truncated_userinfo_too(self):
+        """A truncated userinfo can itself contain more than one unencoded
+        '/' before its own '@'; this must still refuse, not silently allow
+        the handover -- see remote_authority_is_ambiguous's own note on why
+        scanning only the first path segment is the wrong trade-off here."""
+        reason = refusal_reason(
+            _owns_remotes(work=["github.com/acme/*"]), "/flat/api", "personal",
+            remote="https://work/sekrit/more@github.com/acme/api", agent_driven=True,
+        )
+        assert reason is not None
+
+    def test_refuses_even_when_the_unparseable_guess_matches_the_requested_profile(self):
+        """_authority returning None (an unencoded '/' plus a ':' in the
+        password) is the more clearly unparseable shape; normalize_remote's
+        own fallback for it is a blind guess that can coincidentally equal
+        the requested profile's own owns_remotes glob. If claimed_profile
+        trusted that guess, `claimed == requested` would short-circuit
+        before the ambiguity check is ever reached -- this must still
+        refuse."""
+        reason = refusal_reason(
+            _owns_remotes(work=["github.com/acme/*"], personal=[]), "/flat/api", "work",
+            remote="https://user:pass/more@github.com/acme/api", agent_driven=True,
+        )
+        assert reason is not None
+
+    def test_allows_a_human_against_an_ambiguous_origin(self):
+        assert refusal_reason(
+            _owns_remotes(work=["github.com/acme/*"]), "/flat/api", "personal",
+            remote="https://user/pass@github.com/acme/api", agent_driven=False,
+        ) is None
+
+    def test_an_ambiguous_origin_never_overrides_a_confident_claim(self):
+        """A directory scope confidently claims this place for `work`; the
+        origin's own ambiguity must not add a second, different refusal
+        reason or otherwise change an already-confident outcome."""
+        profiles = {
+            "work": Profile(name="work", default_for=["/flat/*"]),
+        }
+        assert refusal_reason(
+            profiles, "/flat/api", "work",
+            remote="https://user/pass@github.com/acme/api", agent_driven=True,
+        ) is None
+
+    def test_an_approved_declaration_overrides_an_ambiguous_origin(self):
+        """The declaration is the claim, in both directions -- it must not be
+        second-guessed by the origin's own unrelated ambiguity."""
+        assert refusal_reason(
+            _owns_remotes(work=["github.com/acme/*"]), "/flat/api", "personal",
+            remote="https://user/pass@github.com/acme/api", declared="personal",
+            agent_driven=True,
+        ) is None
+
     def test_names_the_source_of_the_claim(self):
         """A repo claim and a directory claim are corrected in different places,
         so the message must say which one spoke."""
@@ -197,6 +261,19 @@ def test_exec_refuses_a_profile_the_repository_disowns(
     assert "'personal'" in result.output and "'work'" in result.output
     assert "mien exec work -- <your command>" in result.output
     assert "did not fail" in result.output  # it is a refusal, not a failure
+    called.assert_not_called()
+
+
+def test_exec_refuses_against_an_ambiguous_origin(runner, tmp_path, monkeypatch, mocker):
+    """An origin whose authority can't be parsed with confidence blocks the
+    handover even though nothing confidently claims the place -- the one
+    exception to fail-open this module carries."""
+    _write_config(tmp_path, monkeypatch,
+                  _owns_remotes(work=["github.com/acme/*"], personal=[]))
+    result, called = _exec(runner, monkeypatch, mocker, "personal",
+                           remote="https://user/pass@github.com/acme/api")
+    assert result.exit_code != 0
+    assert "could not be parsed with confidence" in result.output
     called.assert_not_called()
 
 

@@ -214,6 +214,16 @@ def normalize_remote(url: str) -> str:
     form. Lower-casing keeps host and owner matching case-insensitively (a case
     mismatch would be a false *miss* — the status line failing to warn — which is
     the worse direction for a safety signal).
+
+    `_authority`'s own ponytail note names a shape this function inherits
+    unresolved: a password with an unencoded `/` and no `:` parses as a
+    *valid* authority — `user`, not the real host — indistinguishable here
+    from a URL whose path legitimately starts with an `@` (an npm-style
+    `@scope` segment, an `owner@host`-shaped path component). Guessing wrong
+    either way is unsafe in a different direction, so this function makes no
+    guess; see `resolve_remote_profile` for how the owner-matching path
+    recovers the real host without guessing, by testing it against the
+    configured owners instead of the raw string.
     """
     s = url.strip()
     if s.endswith(".git"):
@@ -265,16 +275,7 @@ def remote_embeds_credential(url: str | None) -> bool:
     return ":" in userinfo or userinfo.startswith(CREDENTIAL_PREFIXES)
 
 
-def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | None:
-    """Return the profile whose ``owns_remotes`` claims ``remote``, or None.
-
-    ``remote`` is normalized (`normalize_remote`) and matched against each
-    profile's globs — both the pattern itself and ``<pattern>/*``, so a bare
-    owner glob (`github.com/arinyaho`) claims the owner and everything under it.
-    As with directory scopes, the longest matching pattern wins and an exact tie
-    raises AmbiguousScope rather than guessing.
-    """
-    norm = normalize_remote(remote)
+def _owner_matches(norm: str, profiles: dict[str, Profile]) -> dict[str, int]:
     best: dict[str, int] = {}
     for name in sorted(profiles):
         for raw in profiles[name].owns_remotes:
@@ -283,6 +284,112 @@ def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | N
                 score = len(pat)
                 if score > best.get(name, -1):
                     best[name] = score
+    return best
+
+
+def remote_authority_is_ambiguous(remote: str) -> bool:
+    """True if `remote`'s authority could not be confidently determined.
+
+    The one shape `_authority`'s own docstring already says has no syntactic
+    resolution: a successful parse whose path starts with a segment
+    containing `@` — indistinguishable from a truncated userinfo (a password
+    with an unencoded `/` and no `:`) *and* from an ordinary, untruncated
+    remote whose path legitimately starts with an `@` segment. Several
+    attempts to guess which one it is — testing a recovered candidate
+    against the configured owners, gating on dots, gating on scan depth —
+    each turned out to have a symmetric counter-example: strict enough to
+    avoid misattributing a real, untruncated remote to the wrong configured
+    owner, and it also misses genuine truncation; loose enough to catch
+    genuine truncation, and it also misattributes an untruncated remote
+    (`https://github.com/foo@bar.com/baz` — a real, complete host — to
+    whoever owns `bar.com/baz`). That is not a narrower, separately fixable
+    gap; it is the same ambiguity in both directions at once.
+
+    So this detects the shape without ever guessing an owner from it: a
+    caller that only ever *displays* a claim (the status line, `mien
+    discover`) can keep matching only what it can already confidently
+    normalize, silently missing this shape exactly as before. A caller that
+    must never silently misattribute one (`mien exec`'s origin-owner veto,
+    via `handover.refusal_reason`) can refuse instead of guessing — which is
+    what "wrong identity is the failure mode that matters" requires here:
+    an unresolvable authority is not evidence of nothing, it is evidence of
+    not knowing, and guessing either way risks the failure this exists to
+    prevent.
+
+    Checks everything after the parsed netloc, not only `_authority`'s
+    `path` field: `urlsplit` truncates the authority at the first of `/`,
+    `?` *or* `#`, so an unencoded `?` or `#` in the password truncates it
+    exactly like the documented `/` case, but leaves the leftover `@host/...`
+    in the query or fragment string instead of the path —
+    `https://user?real@host.com/repo` parses to `path=''`, `query=
+    'real@host.com/repo'`, invisible to a path-only scan. Checking the whole
+    remainder after the netloc, however `urlsplit` chose to split it,
+    catches all three. Scanning only the first path segment was the right
+    trade-off for the old guessing design — a missed detection there just
+    meant "no match", the same safe direction as an ordinary unowned
+    remote. It is the wrong trade-off here: a missed detection now means
+    `refusal_reason` silently *allows* the handover for a genuinely
+    unparseable origin, the opposite of what this function exists to
+    prevent. There is no corresponding downside to scanning further: unlike
+    the old recovery guess, this never names an owner, so a broader match
+    only ever costs a spurious refusal, never a misattribution — the same
+    accepted direction as every other case here.
+
+    Also true whenever the netloc itself can't be parsed at all — an
+    unencoded `/` *with* a `:` in the password, an NFKC-unstable netloc, a
+    stray `]` (see `_authority`'s docstring). This is the shape `_authority`
+    calls the more clearly unparseable of the two: `normalize_remote`'s own
+    fallback for it is a blind "strip to the last `@`" guess, safe only for
+    *display*, exactly like the successful-but-ambiguous parse above.
+    Without this, `claimed_profile` could hand `refusal_reason` a
+    confident-looking claim built on that same blind guess, and a request
+    matching the guess would slip through before the ambiguity check is
+    ever reached — the exact "a guess wins" failure this refusal exists to
+    prevent, just reached through the unparseable branch instead.
+    """
+    if "://" not in remote:
+        return False
+    s = remote.strip()
+    if s.endswith(".git"):
+        s = s[:-4]
+    after_scheme = s.partition("://")[2]
+    try:
+        u = urlsplit(s)
+        u.port
+    except ValueError:
+        return True
+    return "@" in after_scheme[len(u.netloc):]
+
+
+def resolve_remote_profile(profiles: dict[str, Profile], remote: str) -> str | None:
+    """Return the profile whose ``owns_remotes`` claims ``remote``, or None.
+
+    ``remote`` is normalized (`normalize_remote`) and matched against each
+    profile's globs — both the pattern itself and ``<pattern>/*``, so a bare
+    owner glob (`github.com/arinyaho`) claims the owner and everything under it.
+    As with directory scopes, the longest matching pattern wins and an exact tie
+    raises AmbiguousScope rather than guessing.
+
+    Never guesses at a truncated or otherwise unparseable authority — see
+    `normalize_remote`'s docstring and `remote_authority_is_ambiguous` for
+    why: this reports `None` for that whole shape, exactly as if nothing
+    claimed it, even where `normalize_remote` did parse a host. A host
+    `_authority` parsed successfully still can't be fully trusted when the
+    surrounding shape is ambiguous — the same truncated-userinfo shape can
+    *look* like a normal dotted host (`firstname.lastname`, or in principle
+    `github.com` itself, followed by its own truncated password) — so this
+    caller, which every profile's confident claim ultimately flows through
+    (`claimed_profile`, and from there `mien exec`'s origin-owner veto),
+    treats the whole shape as unresolved rather than trusting a parse that
+    might itself be the truncated fragment. A caller that only ever
+    *displays* a claim can lose a little precision here in exchange for
+    never handing `refusal_reason` a confident-looking guess to skip its
+    own ambiguity check with.
+    """
+    if remote_authority_is_ambiguous(remote):
+        return None
+    norm = normalize_remote(remote)
+    best = _owner_matches(norm, profiles)
     if not best:
         return None
     top = max(best.values())

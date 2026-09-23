@@ -3042,6 +3042,29 @@ def test_discover_own_finishes_a_partly_owned_owner(runner, tmp_path, monkeypatc
     assert "already owns every repository of github.com/me" in again.output
 
 
+def test_discover_own_completes_on_a_malformed_remote(runner, tmp_path, monkeypatch):
+    """A malformed-but-parseable remote (an unencoded '/' in the password)
+    still completes here: `--own`'s samples are already the schemeless,
+    normalized string discover_remotes grouped by (Found.detail), and
+    remote_authority_is_ambiguous only applies to a raw URL with a scheme
+    -- there is no further ambiguity left to detect once normalize_remote
+    already froze one interpretation of it for the report and the group
+    key both came from. This is unaffected by, and does not exercise, the
+    "never guess" mechanism guarding `mien exec`'s origin-owner veto, which
+    only ever sees the raw `origin` URL (see test_handover.py) -- it just
+    confirms --own's normal matching still works on this odd-looking but
+    perfectly literal string."""
+    from mien.config import load_config
+    _remote_cfg(tmp_path, monkeypatch, work=[])
+    home = tmp_path / "home"
+    _git_repo(home / "code" / "x", "https://user/pass@github.com/acme/x.git")
+
+    result = runner.invoke(main, ["discover", "--scan-root", str(home),
+                                  "--own", "user/pass@github.com", "--profile", "work"])
+    assert result.exit_code == 0, result.output
+    assert load_config().profiles["work"].owns_remotes == ["user/pass@github.com/*"]
+
+
 def test_discover_own_needs_a_profile(runner, tmp_path, monkeypatch):
     _remote_cfg(tmp_path, monkeypatch, work=[])
     result = runner.invoke(main, ["discover", "--scan-root", str(tmp_path),

@@ -177,17 +177,20 @@ class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
         assert resolve_remote_profile(
             ps, "https://user/pass@github.com/acme/repo") is None
 
-    def test_an_ordinary_dotted_host_never_reaches_the_recovery_branch(self):
-        # github.com's dot means the outer guard skips recovery entirely, so
-        # this must miss on the plain (unrecovered) normalization alone --
-        # not because a recovered candidate got rejected.
+    def test_a_host_less_recovered_candidate_is_rejected_even_with_a_real_host(self):
+        # The leading path segment ("user@company") does contain '@', so the
+        # recovery branch is entered and produces the candidate "company/repo"
+        # -- but that candidate's own leading segment ("company") has no dot,
+        # so the recovered-host dot check rejects it before _owner_matches
+        # ever runs, regardless of what the *ordinary* host looked like.
         ps = profiles(rprof("work", "company/repo"))
         assert resolve_remote_profile(ps, "https://github.com/user@company/repo") is None
 
     def test_a_host_less_glob_is_not_spuriously_matched_by_the_recovery(self):
-        # A dotless ordinary host ("gitserver") does reach the recovery
-        # branch; its host-less recovered candidate ("bar/repo") must still
-        # not match a hand-edited, host-less owns_remotes glob.
+        # A dotless recovered candidate ("bar/repo") must not match a
+        # hand-edited, host-less owns_remotes glob even though the glob
+        # itself would fnmatch it -- the recovered-host dot check rejects
+        # the candidate before _owner_matches is ever called.
         ps = profiles(rprof("work", "bar/repo"))
         assert resolve_remote_profile(ps, "https://gitserver/foo@bar/repo") is None
 

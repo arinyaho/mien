@@ -214,14 +214,29 @@ def normalize_remote(url: str) -> str:
     form. Lower-casing keeps host and owner matching case-insensitively (a case
     mismatch would be a false *miss* — the status line failing to warn — which is
     the worse direction for a safety signal).
+
+    `_authority`'s own ponytail note names one shape it cannot flag: a password
+    with an unencoded `/` and no `:` parses as a *valid* authority — `user`, not
+    the real host — because no port field is involved to raise. That host is
+    wrong, not absent, so the ``parts`` branch below would fold it straight into
+    the glob callers match `owns_remotes` against, hiding the real owner instead
+    of merely refusing to guess it. The signal that happened: the leftover `@`
+    that belongs to the real authority shows up in the *path*, in the segment
+    right after the leading `/`, which an ordinary `owner/repo` path never
+    contains. Route that case through the same last-`@` fallback already used
+    for a `None` authority.
     """
     s = url.strip()
     if s.endswith(".git"):
         s = s[:-4]
     if "://" in s:
         parts = _authority(s)
-        # host + path drops the scheme, any `user@` and any `:port` at once.
-        s = parts[1] + parts[2] if parts else s.partition("://")[2].rpartition("@")[2]
+        leaked_authority = parts and "@" in parts[2].lstrip("/").split("/", 1)[0]
+        if parts and not leaked_authority:
+            # host + path drops the scheme, any `user@` and any `:port` at once.
+            s = parts[1] + parts[2]
+        else:
+            s = s.partition("://")[2].rpartition("@")[2]
     elif re.match(r"^[^/]+@[^:/]+:", s):                   # scp-like git@host:path
         s = re.sub(r"^[^@]+@", "", s).replace(":", "/", 1)
     return s.rstrip("/").lower()

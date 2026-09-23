@@ -131,6 +131,32 @@ class TestNormalizeRemote:
         # No host; simply must not crash and must not spuriously match a glob.
         assert normalize_remote("/srv/git/Repo") == "/srv/git/repo"
 
+    def test_an_unencoded_slash_with_no_colon_in_the_password_does_not_hide_the_host(self):
+        """No `:` before the `/` means `.port` never raises, so `_authority`
+        parses `user` as a real host instead of signaling failure. The real
+        host must still surface — not as `user`, and not folded into a glob
+        that can never match an owner."""
+        norm = normalize_remote("https://user/pass@github.com/acme/x.git")
+        assert norm == "github.com/acme/x"
+        assert "user" not in norm and "@" not in norm
+
+
+class TestOwnerMatchSurvivesAnUnencodedSlashInUserinfo:
+    """A malformed-but-parseable `origin` must never make a real owner
+    invisible to matching — the origin-owner veto's stated safety property is
+    that it can only false-refuse, never miss a real owner."""
+
+    def test_resolve_remote_profile_still_matches_the_owner(self):
+        ps = profiles(rprof("work", "github.com/acme"))
+        assert resolve_remote_profile(
+            ps, "https://user/pass@github.com/acme/repo") == "work"
+
+    def test_claimed_profile_still_names_the_remote_owner(self):
+        ps = {"work": Profile(name="work", owns_remotes=["github.com/acme"])}
+        name, source = claimed_profile(
+            ps, "/x/y", remote="https://user/pass@github.com/acme/repo")
+        assert (name, source) == ("work", "repo")
+
 
 class TestResolveRemoteProfile:
     def test_matches_the_owning_profile(self):

@@ -3042,13 +3042,18 @@ def test_discover_own_finishes_a_partly_owned_owner(runner, tmp_path, monkeypatc
     assert "already owns every repository of github.com/me" in again.output
 
 
-def test_discover_own_on_an_ambiguous_remote_does_not_crash_or_falsely_conflict(
-        runner, tmp_path, monkeypatch):
-    """A malformed-but-parseable remote (an unencoded '/' in the password) is
-    exactly the shape resolve_remote_profile now declines to guess at (see
-    its docstring) -- the --own conflict check must not crash on it, and
-    completes normally since it can no longer report a conflict it does not
-    actually know about."""
+def test_discover_own_completes_on_a_malformed_remote(runner, tmp_path, monkeypatch):
+    """A malformed-but-parseable remote (an unencoded '/' in the password)
+    still completes here: `--own`'s samples are already the schemeless,
+    normalized string discover_remotes grouped by (Found.detail), and
+    remote_authority_is_ambiguous only applies to a raw URL with a scheme
+    -- there is no further ambiguity left to detect once normalize_remote
+    already froze one interpretation of it for the report and the group
+    key both came from. This is unaffected by, and does not exercise, the
+    "never guess" mechanism guarding `mien exec`'s origin-owner veto, which
+    only ever sees the raw `origin` URL (see test_handover.py) -- it just
+    confirms --own's normal matching still works on this odd-looking but
+    perfectly literal string."""
     from mien.config import load_config
     _remote_cfg(tmp_path, monkeypatch, work=[])
     home = tmp_path / "home"

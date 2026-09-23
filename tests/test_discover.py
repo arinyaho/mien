@@ -284,18 +284,17 @@ def test_discover_remotes_keeps_a_malformed_credential_out_of_the_owner(tmp_path
         ("remote", "github.com/acme")]
 
 
-def test_own_conflict_check_reports_no_claim_for_an_ambiguous_remote():
-    """`--own`'s conflict check (`_remote_claimed_by`) goes through
-    `resolve_remote_profile`, which declines to match ANY remote whose
-    authority can't be confidently parsed -- even one a profile's
-    owns_remotes glob would otherwise match, since the parsed host itself
-    can't be fully trusted for that shape (see resolve_remote_profile's
-    docstring). This costs a missed conflict warning here in exchange for
-    never handing mien exec's veto a confident guess to trust; a `--own`
-    conflict this misses is caught by the discover report's own "already
-    claimed" listing derived from normalize_remote instead, which is
-    unaffected (see test_discover_remotes_keeps_a_malformed_credential_out_
-    of_the_owner)."""
+def test_remote_claimed_by_declines_a_raw_url_of_the_ambiguous_shape():
+    """`_remote_claimed_by` delegates entirely to `resolve_remote_profile`,
+    so it inherits the same "never guess" contract for a raw URL of the
+    truncated-userinfo shape. In production it is always called with an
+    already-normalized, schemeless `Found.detail` string (see discover.py's
+    `render_report`), for which `remote_authority_is_ambiguous` never
+    triggers at all (it requires a scheme) -- so this call site does not
+    actually exercise the display-precision trade-off in practice; see
+    test_statusline.py for the call site that does (the status line and
+    `mien guard`, which receive the raw `origin` URL). This pins the
+    underlying function's contract directly, independent of that."""
     from mien.discover import _remote_claimed_by
 
     profiles = {"work": Profile(name="work", owns_remotes=["github.com/acme"])}

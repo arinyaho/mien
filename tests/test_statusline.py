@@ -243,6 +243,26 @@ def test_statusline_flags_wrong_identity_by_remote(tmp_path, monkeypatch):
     assert "repo is work's" in result.output and "personal" in result.output
 
 
+def test_statusline_shows_no_claim_for_an_ambiguous_remote(tmp_path, monkeypatch):
+    """The status line receives the raw `origin` URL (with scheme) from
+    git_origin_remote, unlike discover's report or --own's samples, which
+    only ever see an already-normalized, schemeless string -- so this is
+    one of the two call sites (with `mien guard`) that actually reach
+    remote_authority_is_ambiguous's whole-path scan. A remote whose path
+    merely contains '@' (github.com/user@company/repo here -- a real,
+    correctly-parsed host) is exactly the shape resolve_remote_profile
+    declines to trust at all now, even though it could confidently claim
+    it before this fix: this is the documented, accepted trade-off (a
+    caller that only ever displays a claim loses a little precision so
+    mien exec's veto never receives a confident guess), pinned here rather
+    than left untested."""
+    _write_cfg_remotes(tmp_path, monkeypatch, work=["github.com/user"])
+    result = _run("/anywhere/flat/api", monkeypatch,
+                  remote="https://github.com/user@company/repo")
+    assert result.exit_code == 0
+    assert "🟢" not in result.output and "mien:work" not in result.output
+
+
 def _write_cfg_full(tmp_path, monkeypatch, profiles):
     monkeypatch.setenv("MIEN_CONFIG", str(tmp_path / "config.json"))
     save_config(make_config(

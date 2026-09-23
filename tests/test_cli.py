@@ -3042,6 +3042,24 @@ def test_discover_own_finishes_a_partly_owned_owner(runner, tmp_path, monkeypatc
     assert "already owns every repository of github.com/me" in again.output
 
 
+def test_discover_own_on_an_ambiguous_remote_does_not_crash_or_falsely_conflict(
+        runner, tmp_path, monkeypatch):
+    """A malformed-but-parseable remote (an unencoded '/' in the password) is
+    exactly the shape resolve_remote_profile now declines to guess at (see
+    its docstring) -- the --own conflict check must not crash on it, and
+    completes normally since it can no longer report a conflict it does not
+    actually know about."""
+    from mien.config import load_config
+    _remote_cfg(tmp_path, monkeypatch, work=[])
+    home = tmp_path / "home"
+    _git_repo(home / "code" / "x", "https://user/pass@github.com/acme/x.git")
+
+    result = runner.invoke(main, ["discover", "--scan-root", str(home),
+                                  "--own", "user/pass@github.com", "--profile", "work"])
+    assert result.exit_code == 0, result.output
+    assert load_config().profiles["work"].owns_remotes == ["user/pass@github.com/*"]
+
+
 def test_discover_own_needs_a_profile(runner, tmp_path, monkeypatch):
     _remote_cfg(tmp_path, monkeypatch, work=[])
     result = runner.invoke(main, ["discover", "--scan-root", str(tmp_path),

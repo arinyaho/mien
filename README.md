@@ -85,6 +85,10 @@ Git remote owners:
 
 It reads no secret and touches no backend. Claiming an owner is the one thing that writes: `mien discover --own github.com/me --profile personal` adds `github.com/me/*` to that profile's [`owns_remotes`](docs/guide.md#project-pinned-identity) — which is what the status line, `mien guard` and `mien exec` read to tell whose place a repository is. Importing a credential stays an explicit `mien login`.
 
+Once logged in, a credential is checkable without ever being printed — `mien whoami` shows which service a profile has and the *name* of the env var it exports, never the value; and if a command tries to dump the environment anyway, mien redacts known secret values from the output it hands back:
+
+![mien login stores a credential; mien whoami shows only the env var name it exports, never the value; and env output is redacted even when explicitly dumped](docs/demo-setup.gif)
+
 ## FAQ
 
 **Does it work with AI coding agents?** Yes — Claude Code, Codex, GitHub Copilot Chat, and Hermes Agent all install the skill. It only routes the environment-variable plane, not an agent's own service connectors; see the [one rule](#as-an-agent-skill) above.

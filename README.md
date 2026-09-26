@@ -7,6 +7,8 @@
 
 Your agent shares your machine, and its failure mode isn't a crash — it's succeeding as the wrong you: committing to a repository under an identity that isn't yours, or being handed a credential for one that doesn't own the repo it's in. mien is a per-shell credential router for AI agents and humans: it activates one identity at a time and refuses the handover rather than guessing when the identity requested disagrees with whose repository it's in — across Google, GitHub, Slack, Atlassian, Notion, AWS, and OCI. Tokens stay in your secrets vault, never in the shell.
 
+![An agent asks to act as the wrong identity in a colleague's repo; mien refuses the handover instead of guessing, at commit 0d5566b](docs/demo-refusal.gif)
+
 ## What it does
 
 Activate a named identity in your current shell:

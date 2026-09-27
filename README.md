@@ -89,7 +89,7 @@ It reads no secret and touches no backend. Claiming an owner is the one thing th
 { "statusLine": { "type": "command", "command": "mien statusline" } }
 ```
 
-Add that to `.claude/settings.json`, restart the session, and the segment turns red the moment the active identity disagrees with whose repository or directory you're in. Secret-free and silent when `mien` is unconfigured — see [docs/guide.md](docs/guide.md#who-am-i-here--in-the-status-line) for the full behavior. Claude Code-specific; other harnesses expose no equivalent hook.
+Add that to `.claude/settings.json` and the segment turns red the moment the active identity disagrees with whose repository or directory you're in — or even with nothing active at all, if the commit you'd make here would be authored as a different profile than the repository's owner. Secret-free and silent when `mien` is unconfigured — see [docs/guide.md](docs/guide.md#who-am-i-here--in-the-status-line) for the full behavior. Claude Code-specific; other harnesses expose no equivalent hook.
 
 ## FAQ
 

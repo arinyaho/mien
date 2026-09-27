@@ -83,6 +83,14 @@ Git remote owners:
 
 It reads no secret and touches no backend. Claiming an owner is the one thing that writes: `mien discover --own github.com/me --profile personal` adds `github.com/me/*` to that profile's [`owns_remotes`](docs/guide.md#project-pinned-identity) — which is what the status line, `mien guard` and `mien exec` read to tell whose place a repository is. Importing a credential stays an explicit `mien login`.
 
+**Claude Code users:** wire the active identity into your status line, so it's visible before you act rather than after a wrong commit lands:
+
+```json
+{ "statusLine": { "type": "command", "command": "mien statusline" } }
+```
+
+Add that to `.claude/settings.json`, restart the session, and the segment turns red the moment the active identity disagrees with whose repository or directory you're in. Secret-free and silent when `mien` is unconfigured — see [docs/guide.md](docs/guide.md#who-am-i-here--in-the-status-line) for the full behavior. Claude Code-specific; other harnesses expose no equivalent hook.
+
 ## FAQ
 
 **Does it work with AI coding agents?** Yes — Claude Code, Codex, GitHub Copilot Chat, and Hermes Agent all install the skill. It only routes the environment-variable plane, not an agent's own service connectors; see the [one rule](#as-an-agent-skill) above.

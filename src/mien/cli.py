@@ -928,6 +928,8 @@ def _custom_var_name(service: str, name: str | None) -> str | None:
                    "(e.g. 'op read op://Private/item/field'). Keeps the secret out of argv/history.")
 @click.option("--refresh-token-stdin", "refresh_token_stdin", is_flag=True,
               help="(google) read an existing refresh token from stdin instead of running the browser flow")
+@click.option("--no-browser", "no_browser", is_flag=True,
+              help="(google) print the authorization URL and paste the redirected URL back, instead of opening a browser")
 @click.option("--client-id", help="(google) OAuth client ID")
 @click.option("--access-key-id", "access_key_id", help="(aws) AWS access key ID")
 @click.option("--aws-profile", "aws_profile", help="(aws) existing ~/.aws profile name")
@@ -949,6 +951,7 @@ def login_cmd(
     token_stdin: bool,
     secret_cmd: str | None,
     refresh_token_stdin: bool,
+    no_browser: bool,
     client_id: str | None,
     access_key_id: str | None,
     aws_profile: str | None,
@@ -1060,6 +1063,7 @@ def login_cmd(
                 client_id=client_id,
                 client_secret=client_secret,
                 scopes=GOOGLE_DEFAULT_SCOPES,
+                no_browser=no_browser,
             )
         register_secret(refresh)
         oauth_secret_ref = backend.put(

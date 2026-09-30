@@ -929,7 +929,11 @@ def _custom_var_name(service: str, name: str | None) -> str | None:
 @click.option("--refresh-token-stdin", "refresh_token_stdin", is_flag=True,
               help="(google) read an existing refresh token from stdin instead of running the browser flow")
 @click.option("--no-browser", "no_browser", is_flag=True,
-              help="(google) print the authorization URL and paste the redirected URL back, instead of opening a browser")
+              help="(google) do not open a browser: print the authorization URL, then paste back the "
+                   "redirected URL (address bar of the page that fails to load), its query string, or the code")
+@click.option("--port", "port", type=click.IntRange(1024, 65535),
+              help="(google) listen on this fixed localhost port for the redirect; over SSH, forward it "
+                   "(ssh -L PORT:localhost:PORT <host>) and no paste is needed")
 @click.option("--client-id", help="(google) OAuth client ID")
 @click.option("--access-key-id", "access_key_id", help="(aws) AWS access key ID")
 @click.option("--aws-profile", "aws_profile", help="(aws) existing ~/.aws profile name")
@@ -952,6 +956,7 @@ def login_cmd(
     secret_cmd: str | None,
     refresh_token_stdin: bool,
     no_browser: bool,
+    port: int | None,
     client_id: str | None,
     access_key_id: str | None,
     aws_profile: str | None,
@@ -961,6 +966,14 @@ def login_cmd(
     atlassian_email: str | None,
     base_url: str | None,
 ) -> None:
+    """Store a credential for PROFILE_NAME.
+
+    Google on a host without a browser: with a cloud backend (gcp_secret_manager),
+    log in once on a machine that has a browser; the credential and the profile go
+    to the backend, and this host picks them up with `mien sync` (or `mien init`).
+    Without a cloud backend, use --no-browser (paste the redirect back) or --port
+    (forward the redirect port over SSH).
+    """
     # Before the config is read: a flag that cannot mean anything is a mistake to
     # report on its own terms, not one to blame a backend or a config for.
     var_name = _custom_var_name(service, custom_name)
@@ -1064,6 +1077,7 @@ def login_cmd(
                 client_secret=client_secret,
                 scopes=GOOGLE_DEFAULT_SCOPES,
                 no_browser=no_browser,
+                port=port,
             )
         register_secret(refresh)
         oauth_secret_ref = backend.put(

@@ -72,6 +72,15 @@ mien login personal --service slack --workspace team-a
 mien login personal --service custom --name ANTHROPIC_API_KEY   # a credential of your own
 ```
 
+**Google on a host with no browser (SSH, server).** Log in once on a machine that has a browser. With a cloud backend (`gcp_secret_manager`) the refresh token and the client secret go to the backend and the profile goes to its manifest, so the headless host needs no login of its own: `mien init` (first time) or `mien sync` imports the profile and `mien token google` / `mien exec` mint access tokens from the stored refresh token. That host still needs access to the backend, and the local backends (`macos_keychain`, `keyring`) do not share credentials between machines. When the login must happen on the headless host itself:
+
+```bash
+mien login work --service google --email me@example.com --port 8085   # then, from the browser machine: ssh -L 8085:localhost:8085 <host>
+mien login work --service google --email me@example.com --no-browser  # no tunnel: open the URL anywhere, paste the redirected URL back
+```
+
+With `--port` the redirect reaches mien directly and nothing is pasted. With `--no-browser` the page the browser lands on fails to load; copy its address bar (`Cmd+L` / `Ctrl+L`, then copy — Safari shows only the domain but copies the full URL) and paste it at the prompt. The full URL, its query string, or the bare code all work, and stray line breaks and quotes are ignored.
+
 `mien discover` is the onboarding shortcut: it inventories the identities already configured locally (AWS/OCI profiles, gcloud configurations, GitHub accounts) *and* the places — the git remote owners of the repositories on this machine — showing which are already bound to a mien profile and which are not, with the command to bind each:
 
 ```

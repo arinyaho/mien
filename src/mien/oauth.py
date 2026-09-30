@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
+import re
 import webbrowser
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import click
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 MANUAL_REDIRECT_URI = "http://localhost"
+_QUOTES = "\"'`\u2018\u2019\u201c\u201d"
 
 
 def _browser_available() -> bool:
@@ -16,32 +20,83 @@ def _browser_available() -> bool:
     return True
 
 
+def parse_redirect_input(text: str) -> tuple[str, str | None]:
+    """Extract (code, state) from what the user pasted: the redirected URL, its
+    query string, or the bare code. state is None unless the paste carried one.
+
+    Whitespace is removed everywhere, not just at the ends: a URL wrapped by the
+    terminal arrives with newlines in the middle, and neither an authorization code
+    nor a URL contains a legitimate space. Error messages never echo the input.
+    """
+    text = re.sub(r"\s+", "", text).strip(_QUOTES)
+    if not text:
+        raise click.ClickException("nothing was pasted (empty input)")
+    if "://" in text:
+        query = urlsplit(text).query
+    elif "=" in text or "&" in text:
+        query = text.lstrip("?")
+    else:
+        return unquote(text), None
+    params = parse_qs(query)
+    if "error" in params:
+        raise click.ClickException(f"Google denied the request: {params['error'][0]}")
+    if not params.get("code"):
+        raise click.ClickException(
+            "no 'code' found in the pasted value; paste the full redirected URL, "
+            "its query string, or the code itself"
+        )
+    return params["code"][0], (params.get("state") or [None])[0]
+
+
+def _ssh_tunnel_hint(port: int) -> str:
+    return (
+        f"This host is reached over SSH. From the machine that has the browser, run:\n"
+        f"  ssh -L {port}:localhost:{port} <host>\n"
+        f"then open the URL below in that browser; the redirect reaches this process directly."
+    )
+
+
 def _manual_flow(flow: InstalledAppFlow):
-    # The pasted URL is rewritten to https because oauthlib rejects http redirects
-    # unless OAUTHLIB_INSECURE_TRANSPORT is set process-wide. State is verified by
-    # oauthlib against the value generated in authorization_url().
+    # State is verified by oauthlib against the value generated in
+    # authorization_url(), so the response is rebuilt from the parsed parts: the
+    # paste may be a bare query string, and oauthlib rejects an http redirect
+    # unless OAUTHLIB_INSECURE_TRANSPORT is set process-wide, hence https.
     flow.redirect_uri = MANUAL_REDIRECT_URI
     url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+    if os.environ.get("SSH_CONNECTION"):
+        click.echo(
+            "This host is reached over SSH. To skip the paste step, re-run with "
+            "--port <port> and forward that port from your browser machine.",
+            err=True,
+        )
     click.echo("Open this URL in a browser on any machine and grant access:\n")
     click.echo(url + "\n")
     click.echo(
-        "The browser will then be redirected to a localhost page that fails to load. "
-        "Copy the full URL from its address bar and paste it here."
+        "The browser then lands on a localhost page that fails to load. Select its "
+        "address bar (Cmd+L / Ctrl+L), copy, and paste it here. Safari shows only the "
+        "domain; the copy still contains the full URL."
     )
-    pasted = click.prompt("Redirected URL").strip()
-    if "code=" not in pasted or not pasted.startswith(("http://", "https://")):
-        raise click.ClickException("pasted value is not a redirect URL containing 'code='")
-    if pasted.startswith("http://"):
-        pasted = "https://" + pasted[len("http://"):]
+    code, state = parse_redirect_input(click.prompt("Redirected URL", hide_input=True))
     try:
-        flow.fetch_token(authorization_response=pasted)
+        if state is None:
+            flow.fetch_token(code=code)
+        else:
+            flow.fetch_token(
+                authorization_response=f"https://localhost/?code={quote(code, safe='')}&state={quote(state, safe='')}"
+            )
     except Exception as exc:
-        raise click.ClickException(f"could not complete Google login: {exc}") from exc
+        msg = str(exc).replace(code, "<code>")
+        raise click.ClickException(f"could not complete Google login: {msg}") from exc
     return flow.credentials
 
 
 def google_installed_app_flow(
-    *, client_id: str, client_secret: str, scopes: list[str], no_browser: bool = False
+    *,
+    client_id: str,
+    client_secret: str,
+    scopes: list[str],
+    no_browser: bool = False,
+    port: int | None = None,
 ) -> str:
     cfg = {
         "installed": {
@@ -53,12 +108,21 @@ def google_installed_app_flow(
         }
     }
     flow = InstalledAppFlow.from_client_config(cfg, scopes=scopes)
-    if no_browser or not _browser_available():
+    browser = not no_browser and _browser_available()
+    if browser:
+        creds = flow.run_local_server(port=port or 0, prompt="consent", access_type="offline")
+    elif port:
+        if not no_browser:
+            click.echo("No browser available on this host.", err=True)
+        if os.environ.get("SSH_CONNECTION"):
+            click.echo(_ssh_tunnel_hint(port), err=True)
+        creds = flow.run_local_server(
+            port=port, open_browser=False, prompt="consent", access_type="offline"
+        )
+    else:
         if not no_browser:
             click.echo("No browser available on this host; using the manual paste flow.", err=True)
         creds = _manual_flow(flow)
-    else:
-        creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
     if not creds.refresh_token:
         raise RuntimeError(
             "OAuth completed but no refresh token was returned. "

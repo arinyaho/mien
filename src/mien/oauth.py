@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 import webbrowser
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote
 
 import click
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -38,10 +38,11 @@ def parse_redirect_input(text: str) -> tuple[str, str]:
     text = re.sub(r"\s+", "", text).strip(_QUOTES)
     if not text:
         raise click.ClickException("nothing was pasted (empty input)")
-    if "://" in text:
-        query = urlsplit(text).query
+    text = text.split("#", 1)[0]
+    if "?" in text:
+        query = text.split("?", 1)[1]
     elif "=" in text or "&" in text:
-        query = text.lstrip("?")
+        query = text
     else:
         raise click.ClickException(
             "a bare code cannot be verified; paste the full redirected URL "

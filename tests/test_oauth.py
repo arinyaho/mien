@@ -51,6 +51,9 @@ FULL = "http://localhost/?state=st&code=4%2F0AbCdEf-ghi_JKL&scope=openid"
     ("http://localhost:8085/?code=4%2F0AbCdEf-ghi_JKL&state=st\r\n", (CODE, "st")),
     ("code=4%2F0AbCdEf-ghi_JKL&state=st", (CODE, "st")),
     ("?code=4%2F0AbCdEf-ghi_JKL&state=st", (CODE, "st")),
+    ("localhost/?state=st&code=4%2F0AbCdEf-ghi_JKL", (CODE, "st")),
+    ("localhost:8085/?code=4%2F0AbCdEf-ghi_JKL&state=st", (CODE, "st")),
+    ("scope=https://www.googleapis.com/auth/drive&code=4%2F0AbCdEf-ghi_JKL&state=st", (CODE, "st")),
 ])
 def test_parse_redirect_input(text, expected):
     assert parse_redirect_input(text) == expected

@@ -3,26 +3,33 @@ from __future__ import annotations
 import os
 import re
 import webbrowser
-from urllib.parse import parse_qs, quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import click
 from google_auth_oauthlib.flow import InstalledAppFlow
+
+from mien.security import register_secret
 
 MANUAL_REDIRECT_URI = "http://localhost"
 _QUOTES = "\"'`\u2018\u2019\u201c\u201d"
 
 
+_CONSOLE_BROWSERS = {"lynx", "w3m", "links", "elinks", "www-browser"}
+
+
 def _browser_available() -> bool:
+    # A console browser registers fine on a headless host but cannot show the
+    # consent page, so the local-server flow would wait forever for a redirect.
     try:
-        webbrowser.get()
+        return webbrowser.get().name not in _CONSOLE_BROWSERS
     except webbrowser.Error:
         return False
-    return True
 
 
-def parse_redirect_input(text: str) -> tuple[str, str | None]:
-    """Extract (code, state) from what the user pasted: the redirected URL, its
-    query string, or the bare code. state is None unless the paste carried one.
+def parse_redirect_input(text: str) -> tuple[str, str]:
+    """Extract (code, state) from what the user pasted: the redirected URL or its
+    query string. Both must carry state; a bare code is refused because nothing
+    would tie it to this login attempt.
 
     Whitespace is removed everywhere, not just at the ends: a URL wrapped by the
     terminal arrives with newlines in the middle, and neither an authorization code
@@ -36,16 +43,24 @@ def parse_redirect_input(text: str) -> tuple[str, str | None]:
     elif "=" in text or "&" in text:
         query = text.lstrip("?")
     else:
-        return unquote(text), None
+        raise click.ClickException(
+            "a bare code cannot be verified; paste the full redirected URL "
+            "(or its query string) so its state can be checked"
+        )
     params = parse_qs(query)
     if "error" in params:
         raise click.ClickException(f"Google denied the request: {params['error'][0]}")
     if not params.get("code"):
         raise click.ClickException(
-            "no 'code' found in the pasted value; paste the full redirected URL, "
-            "its query string, or the code itself"
+            "no 'code' found in the pasted value; paste the full redirected URL "
+            "or its query string"
         )
-    return params["code"][0], (params.get("state") or [None])[0]
+    if not params.get("state"):
+        raise click.ClickException(
+            "no 'state' found in the pasted value; paste the full redirected URL "
+            "or its query string so its state can be checked"
+        )
+    return params["code"][0], params["state"][0]
 
 
 def _ssh_tunnel_hint(port: int) -> str:
@@ -77,15 +92,16 @@ def _manual_flow(flow: InstalledAppFlow):
         "domain; the copy still contains the full URL."
     )
     code, state = parse_redirect_input(click.prompt("Redirected URL", hide_input=True))
+    for secret in (code, state):
+        register_secret(secret)
     try:
-        if state is None:
-            flow.fetch_token(code=code)
-        else:
-            flow.fetch_token(
-                authorization_response=f"https://localhost/?code={quote(code, safe='')}&state={quote(state, safe='')}"
-            )
+        flow.fetch_token(
+            authorization_response=f"https://localhost/?code={quote(code, safe='')}&state={quote(state, safe='')}"
+        )
     except Exception as exc:
-        msg = str(exc).replace(code, "<code>")
+        msg = str(exc)
+        for secret in (code, state):
+            msg = msg.replace(secret, "<redacted>").replace(quote(secret, safe=""), "<redacted>")
         raise click.ClickException(f"could not complete Google login: {msg}") from exc
     return flow.credentials
 

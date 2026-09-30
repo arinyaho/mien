@@ -930,7 +930,8 @@ def _custom_var_name(service: str, name: str | None) -> str | None:
               help="(google) read an existing refresh token from stdin instead of running the browser flow")
 @click.option("--no-browser", "no_browser", is_flag=True,
               help="(google) do not open a browser: print the authorization URL, then paste back the "
-                   "redirected URL (address bar of the page that fails to load), its query string, or the code")
+                   "redirected URL (address bar of the page that fails to load) or its query string. "
+                   "With --port, listen for the redirect instead of pasting")
 @click.option("--port", "port", type=click.IntRange(1024, 65535),
               help="(google) listen on this fixed localhost port for the redirect; over SSH, forward it "
                    "(ssh -L PORT:localhost:PORT <host>) and no paste is needed")
@@ -977,6 +978,11 @@ def login_cmd(
     # Before the config is read: a flag that cannot mean anything is a mistake to
     # report on its own terms, not one to blame a backend or a config for.
     var_name = _custom_var_name(service, custom_name)
+    if no_browser or port is not None:
+        if service != "google":
+            raise click.UsageError("--no-browser and --port apply only to --service google")
+        if refresh_token_stdin:
+            raise click.UsageError("--no-browser and --port do nothing with --refresh-token-stdin (no login flow runs)")
     cfg = _require_config()
     if profile_name not in cfg.profiles:
         click.confirm(f"Profile {profile_name!r} not found. Create it?", default=False, abort=True)

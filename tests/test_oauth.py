@@ -40,7 +40,7 @@ def test_raises_when_no_refresh_token(mocker):
 
 
 CODE = "4/0AbCdEf-ghi_JKL"
-FULL = f"http://localhost/?state=st&code=4%2F0AbCdEf-ghi_JKL&scope=openid"
+FULL = "http://localhost/?state=st&code=4%2F0AbCdEf-ghi_JKL&scope=openid"
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -51,10 +51,6 @@ FULL = f"http://localhost/?state=st&code=4%2F0AbCdEf-ghi_JKL&scope=openid"
     ("http://localhost:8085/?code=4%2F0AbCdEf-ghi_JKL&state=st\r\n", (CODE, "st")),
     ("code=4%2F0AbCdEf-ghi_JKL&state=st", (CODE, "st")),
     ("?code=4%2F0AbCdEf-ghi_JKL&state=st", (CODE, "st")),
-    ("code=4%2F0AbCdEf-ghi_JKL", (CODE, None)),
-    (CODE, (CODE, None)),
-    (f' "{CODE}" \n', (CODE, None)),
-    ("4%2F0AbCdEf-ghi_JKL", (CODE, None)),
 ])
 def test_parse_redirect_input(text, expected):
     assert parse_redirect_input(text) == expected
@@ -66,6 +62,10 @@ def test_parse_redirect_input(text, expected):
     ("http://localhost/?error=access_denied&state=st", "access_denied"),
     ("http://localhost/?state=st", "code"),
     ("state=st", "code"),
+    ("code=4%2F0AbCdEf-ghi_JKL", "state"),
+    (CODE, "state"),
+    (f' "{CODE}" \n', "state"),
+    ("4%2F0AbCdEf-ghi_JKL", "state"),
 ])
 def test_parse_redirect_input_errors(text, match):
     with pytest.raises(click.ClickException, match=match):
@@ -95,10 +95,11 @@ def test_no_browser_pastes_url_and_rebuilds_https_response(mocker):
     )
 
 
-def test_code_only_paste_skips_state_check(mocker):
+def test_code_only_paste_is_rejected_without_exchange(mocker):
     flow = _mocks(mocker, CODE)
-    _login()
-    flow.fetch_token.assert_called_once_with(code=CODE)
+    with pytest.raises(click.ClickException, match="state"):
+        _login()
+    flow.fetch_token.assert_not_called()
 
 
 def test_no_browser_flag_forces_manual_even_with_browser(mocker):
@@ -109,9 +110,15 @@ def test_no_browser_flag_forces_manual_even_with_browser(mocker):
 
 def test_prompt_is_preceded_by_copy_hint(mocker, capsys):
     _mocks(mocker, FULL)
+    seen = {}
+
+    def prompt(*a, **k):
+        seen["out"] = capsys.readouterr().out
+        return FULL
+
+    mocker.patch("mien.oauth.click.prompt", side_effect=prompt)
     _login()
-    out = capsys.readouterr().out
-    assert "Cmd+L" in out and "Ctrl+L" in out
+    assert "Cmd+L" in seen["out"] and "Ctrl+L" in seen["out"]
 
 
 def test_ssh_without_port_suggests_port(mocker, monkeypatch, capsys):
@@ -130,6 +137,43 @@ def test_port_without_browser_listens_and_prints_tunnel(mocker, monkeypatch, cap
     kwargs = flow.run_local_server.call_args.kwargs
     assert kwargs["port"] == 8085 and kwargs["open_browser"] is False
     assert "ssh -L 8085:localhost:8085" in capsys.readouterr().err
+
+
+def test_no_browser_with_port_listens_without_opening_browser(mocker):
+    flow = _mocks(mocker, FULL, available=True)
+    flow.run_local_server.return_value.refresh_token = "r"
+    _login(no_browser=True, port=8085)
+    kwargs = flow.run_local_server.call_args.kwargs
+    assert kwargs["port"] == 8085 and kwargs["open_browser"] is False
+
+
+@pytest.mark.parametrize("name", ["lynx", "w3m", "links", "elinks", "www-browser"])
+def test_console_browser_is_not_a_browser(mocker, name):
+    from mien import oauth
+    fake = MagicMock()
+    fake.name = name
+    mocker.patch("mien.oauth.webbrowser.get", return_value=fake)
+    assert oauth._browser_available() is False
+
+
+def test_gui_browser_is_a_browser(mocker):
+    from mien import oauth
+    fake = MagicMock()
+    fake.name = "MacOSX"
+    mocker.patch("mien.oauth.webbrowser.get", return_value=fake)
+    assert oauth._browser_available() is True
+
+
+def test_exchange_failure_redacts_code_and_state_in_every_form(mocker):
+    flow = _mocks(mocker, FULL)
+    flow.fetch_token.side_effect = RuntimeError(
+        "boom https://localhost/?code=4%2F0AbCdEf-ghi_JKL&state=st-secret-value plain 4/0AbCdEf-ghi_JKL"
+    )
+    mocker.patch("mien.oauth.click.prompt", return_value=FULL.replace("state=st", "state=st-secret-value"))
+    with pytest.raises(click.ClickException) as exc:
+        _login()
+    msg = exc.value.message
+    assert "0AbCdEf" not in msg and "st-secret-value" not in msg
 
 
 def test_port_with_browser_opens_it(mocker):

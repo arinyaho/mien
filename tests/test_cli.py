@@ -3157,6 +3157,25 @@ def test_login_google_forwards_no_browser_and_port(runner, mien_cfg, mocker):
 def test_login_google_rejects_out_of_range_port(runner, mien_cfg):
     result = runner.invoke(
         main,
-        ["login", "personal", "--service", "google", "--port", "80"],
+        ["login", "personal", "--service", "google", "--email", "me@example.com",
+         "--client-id", "cid", "--port", "80"],
+    )
+    assert result.exit_code == 2
+    assert "--port" in result.output and "1024" in result.output
+
+
+@pytest.mark.parametrize("flag", [["--no-browser"], ["--port", "8085"]])
+def test_login_rejects_google_only_flags_for_other_services(runner, mien_cfg, flag):
+    result = runner.invoke(main, ["login", "personal", "--service", "github", *flag])
+    assert result.exit_code != 0
+    assert "google" in result.output
+
+
+@pytest.mark.parametrize("flag", [["--no-browser"], ["--port", "8085"]])
+def test_login_rejects_browser_flags_with_refresh_token_stdin(runner, mien_cfg, flag):
+    result = runner.invoke(
+        main,
+        ["login", "personal", "--service", "google", "--refresh-token-stdin", *flag],
     )
     assert result.exit_code != 0
+    assert "--refresh-token-stdin" in result.output

@@ -131,6 +131,13 @@ def test_ssh_without_port_suggests_port(mocker, monkeypatch, capsys):
     assert "--port" in capsys.readouterr().err
 
 
+def test_explicit_no_browser_over_ssh_does_not_suggest_port(mocker, monkeypatch, capsys):
+    _mocks(mocker, FULL, available=True)
+    monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
+    _login(no_browser=True)
+    assert "--port" not in capsys.readouterr().err
+
+
 def test_port_without_browser_listens_and_prints_tunnel(mocker, monkeypatch, capsys):
     flow = _mocks(mocker, FULL)
     flow.run_local_server.return_value.refresh_token = "refresh-tunnel"

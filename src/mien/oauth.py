@@ -64,12 +64,21 @@ def parse_redirect_input(text: str) -> tuple[str, str]:
     return params["code"][0], params["state"][0]
 
 
-def _ssh_tunnel_hint(port: int) -> str:
-    return (
-        f"This host is reached over SSH. From the machine that has the browser, run:\n"
-        f"  ssh -L {port}:localhost:{port} <host>\n"
-        f"then open the URL below in that browser; the redirect reaches this process directly."
-    )
+def _echo_ssh_hint(port: int | None) -> None:
+    if not os.environ.get("SSH_CONNECTION"):
+        return
+    if port:
+        msg = (
+            f"This host is reached over SSH. From the machine that has the browser, run:\n"
+            f"  ssh -L {port}:localhost:{port} <host>\n"
+            f"then open the URL below in that browser; the redirect reaches this process directly."
+        )
+    else:
+        msg = (
+            "This host is reached over SSH. To skip the paste step, re-run with "
+            "--port <port> and forward that port from your browser machine."
+        )
+    click.echo(msg, err=True)
 
 
 def _manual_flow(flow: InstalledAppFlow):
@@ -79,12 +88,6 @@ def _manual_flow(flow: InstalledAppFlow):
     # unless OAUTHLIB_INSECURE_TRANSPORT is set process-wide, hence https.
     flow.redirect_uri = MANUAL_REDIRECT_URI
     url, _ = flow.authorization_url(prompt="consent", access_type="offline")
-    if os.environ.get("SSH_CONNECTION"):
-        click.echo(
-            "This host is reached over SSH. To skip the paste step, re-run with "
-            "--port <port> and forward that port from your browser machine.",
-            err=True,
-        )
     click.echo("Open this URL in a browser on any machine and grant access:\n")
     click.echo(url + "\n")
     click.echo(
@@ -131,14 +134,14 @@ def google_installed_app_flow(
     elif port:
         if not no_browser:
             click.echo("No browser available on this host.", err=True)
-        if os.environ.get("SSH_CONNECTION"):
-            click.echo(_ssh_tunnel_hint(port), err=True)
+        _echo_ssh_hint(port)
         creds = flow.run_local_server(
             port=port, open_browser=False, prompt="consent", access_type="offline"
         )
     else:
         if not no_browser:
             click.echo("No browser available on this host; using the manual paste flow.", err=True)
+            _echo_ssh_hint(None)
         creds = _manual_flow(flow)
     if not creds.refresh_token:
         raise RuntimeError(

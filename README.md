@@ -7,6 +7,8 @@
 
 Your agent shares your machine, and its failure mode isn't a crash — it's succeeding as the wrong you: committing to a repository under an identity that isn't yours, or being handed a credential for one that doesn't own the repo it's in. mien is a per-shell credential router for AI agents and humans: it activates one identity at a time and refuses the handover rather than guessing when the identity requested disagrees with whose repository it's in — across Google, GitHub, Slack, Atlassian, Notion, AWS, and OCI. Tokens stay in your secrets vault, never in the shell.
 
+![An agent asks to act as the wrong identity in a colleague's repo; mien refuses the handover instead of guessing, at commit 0d5566b](docs/demo-refusal.gif)
+
 ## What it does
 
 Activate a named identity in your current shell:
@@ -72,6 +74,15 @@ mien login personal --service slack --workspace team-a
 mien login personal --service custom --name ANTHROPIC_API_KEY   # a credential of your own
 ```
 
+**Google on a host with no browser (SSH, server).** Log in once on a machine that has a browser. With a cloud backend (`gcp_secret_manager`) the refresh token and the client secret go to the backend and the profile goes to its manifest, so the headless host needs no login of its own: `mien init` (first time) or `mien sync` imports the profile and `mien token google` / `mien exec` mint access tokens from the stored refresh token. That host still needs access to the backend, and the local backends (`macos_keychain`, `keyring`) do not share credentials between machines. When the login must happen on the headless host itself:
+
+```bash
+mien login work --service google --email me@example.com --port 8085   # then, from the browser machine: ssh -L 8085:localhost:8085 <host>
+mien login work --service google --email me@example.com --no-browser  # no tunnel: open the URL anywhere, paste the redirected URL back
+```
+
+With `--port` the redirect reaches mien directly and nothing is pasted. With `--no-browser` the page the browser lands on fails to load; copy its address bar (`Cmd+L` / `Ctrl+L`, then copy — Safari shows only the domain but copies the full URL) and paste it at the prompt. The full URL or its query string (`code=…&state=…`) works, and stray line breaks and quotes are ignored; a bare code is refused because its `state` cannot be checked. Combined with `--port`, `--no-browser` only stops mien from opening a browser: it still listens on the port and nothing is pasted.
+
 `mien discover` is the onboarding shortcut: it inventories the identities already configured locally (AWS/OCI profiles, gcloud configurations, GitHub accounts) *and* the places — the git remote owners of the repositories on this machine — showing which are already bound to a mien profile and which are not, with the command to bind each:
 
 ```
@@ -92,6 +103,10 @@ It reads no secret and touches no backend. Claiming an owner is the one thing th
 Add that to `.claude/settings.json` and the segment turns red the moment the active identity disagrees with whose repository or directory you're in — or even with nothing active at all, if the commit you'd make here would be authored as a different profile than the repository's owner. Secret-free and silent when `mien` is unconfigured — see [docs/guide.md](docs/guide.md#who-am-i-here--in-the-status-line) for the full behavior. Claude Code-specific; other harnesses expose no equivalent hook.
 
 ![Claude Code session with mien statusline configured, showing the green mien:arinyaho segment at the bottom](docs/statusline.png)
+
+Once logged in, a credential is checkable without ever being printed — `mien whoami` shows which service a profile has and the *name* of the env var it exports, never the value; and under a detected AI agent harness, if a command tries to dump the environment anyway, `mien exec`/`mien run` redact known secret values from the output they hand back before the agent sees it (a plain human terminal isn't wrapped this way — see [SECURITY.md](SECURITY.md) for exactly which harnesses are detected):
+
+![mien login stores a credential; mien whoami shows only the env var name it exports, never the value; and env output is redacted even when explicitly dumped](docs/demo-setup.gif)
 
 ## FAQ
 

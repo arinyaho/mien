@@ -3137,3 +3137,45 @@ class TestProfileExportsAreDiscoverable:
         assert "MIEN_SLACK_TOKENS" in result.output
         assert "mien exec" in result.output
         assert "whoami" in result.output
+
+
+def test_login_google_forwards_no_browser_and_port(runner, mien_cfg, mocker):
+    flow = mocker.patch("mien.cli.google_installed_app_flow", return_value="refresh-zzz")
+    mocker.patch("mien.cli.load_backend").return_value.put.side_effect = ["ref://a", "ref://b"]
+    runner.invoke(main, ["init"], input="2\nmien-\n")
+    result = runner.invoke(
+        main,
+        ["login", "personal", "--service", "google", "--email", "me@example.com",
+         "--client-id", "cid", "--no-browser", "--port", "8085"],
+        input="y\ncsec\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert flow.call_args.kwargs["no_browser"] is True
+    assert flow.call_args.kwargs["port"] == 8085
+
+
+def test_login_google_rejects_out_of_range_port(runner, mien_cfg):
+    result = runner.invoke(
+        main,
+        ["login", "personal", "--service", "google", "--email", "me@example.com",
+         "--client-id", "cid", "--port", "80"],
+    )
+    assert result.exit_code == 2
+    assert "--port" in result.output and "1024" in result.output
+
+
+@pytest.mark.parametrize("flag", [["--no-browser"], ["--port", "8085"]])
+def test_login_rejects_google_only_flags_for_other_services(runner, mien_cfg, flag):
+    result = runner.invoke(main, ["login", "personal", "--service", "github", *flag])
+    assert result.exit_code != 0
+    assert "google" in result.output
+
+
+@pytest.mark.parametrize("flag", [["--no-browser"], ["--port", "8085"]])
+def test_login_rejects_browser_flags_with_refresh_token_stdin(runner, mien_cfg, flag):
+    result = runner.invoke(
+        main,
+        ["login", "personal", "--service", "google", "--refresh-token-stdin", *flag],
+    )
+    assert result.exit_code != 0
+    assert "--refresh-token-stdin" in result.output

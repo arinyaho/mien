@@ -69,3 +69,11 @@ What was fixed instead is the refusal: asking for a service token does not mint 
 ## Mirrors are kept honest by tests, not by abstraction
 
 `plan_env` answers "what would this profile export" without reading a secret; `build_env` answers it by actually reading them. They cannot share code, so nothing but a test forces them to agree on the same key set. The parity test is treated as part of the function rather than as coverage, and each of its rows is checked to be the unique killer of the branch it names — the alternative, a shared declarative source consumed by both, buys less than it costs.
+
+## Google login without a browser: what was rejected
+
+Google's device authorization flow is unusable: it accepts only `openid`, `email`, `profile`, `drive.file`, `drive.appdata` and the YouTube scopes, and a Google profile needs `gmail.modify`, `calendar`, `drive` and `cloud-platform`.
+
+A hosted relay page that catches the redirect and shows the code is not built: it adds infrastructure to run and a third party the authorization code passes through, to save one paste.
+
+The Desktop client type accepts a loopback redirect on any port, so `--port` needs no change to the client configuration.

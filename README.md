@@ -94,6 +94,16 @@ Git remote owners:
 
 It reads no secret and touches no backend. Claiming an owner is the one thing that writes: `mien discover --own github.com/me --profile personal` adds `github.com/me/*` to that profile's [`owns_remotes`](docs/guide.md#project-pinned-identity) — which is what the status line, `mien guard` and `mien exec` read to tell whose place a repository is. Importing a credential stays an explicit `mien login`.
 
+**Claude Code users:** wire the active identity into your status line, so it's visible before you act rather than after a wrong commit lands:
+
+```json
+{ "statusLine": { "type": "command", "command": "mien statusline" } }
+```
+
+Add that to `.claude/settings.json` and the segment turns red the moment the active identity disagrees with whose repository or directory you're in — or even with nothing active at all, if the commit you'd make here would be authored as a different profile than the repository's owner. Secret-free and silent when `mien` is unconfigured — see [docs/guide.md](docs/guide.md#who-am-i-here--in-the-status-line) for the full behavior. Claude Code-specific; other harnesses expose no equivalent hook.
+
+![Claude Code session with mien statusline configured, showing the green mien:arinyaho segment at the bottom](docs/statusline.png)
+
 Once logged in, a credential is checkable without ever being printed — `mien whoami` shows which service a profile has and the *name* of the env var it exports, never the value; and under a detected AI agent harness, if a command tries to dump the environment anyway, `mien exec`/`mien run` redact known secret values from the output they hand back before the agent sees it (a plain human terminal isn't wrapped this way — see [SECURITY.md](SECURITY.md) for exactly which harnesses are detected):
 
 ![mien login stores a credential; mien whoami shows only the env var name it exports, never the value; and env output is redacted even when explicitly dumped](docs/demo-setup.gif)

@@ -39,7 +39,7 @@ uv tool install git+https://github.com/arinyaho/mien    # or: pipx install git+h
 echo 'eval "$(mien shell-init)"' >> ~/.zshrc            # adds the mien-use / mien-unset wrappers
 ```
 
-No checkout needed — both lines install from the repo directly. `mien shell-init` prints the shell wrappers; `eval`-ing it defines `mien-use` and `mien-unset` and wires the exit-trap cleanup. Use `--shell bash` (or add to `~/.bashrc`) for bash.
+No checkout needed — both lines install from the repo directly. `mien shell-init` prints the shell wrappers; `eval`-ing it defines `mien-use` and `mien-unset` and wires the exit-trap cleanup. It also turns on tab completion for mien's own subcommands (zsh and bash both), so `mien <TAB>` lists what you can run. Use `--shell bash` (or add to `~/.bashrc`) for bash.
 
 To hack on it, clone and install from the working tree instead:
 

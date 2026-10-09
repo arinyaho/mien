@@ -527,6 +527,7 @@ def _profiles_for_vars(consequence: str) -> dict[str, Profile]:
 
 @main.command("list")
 def list_cmd() -> None:
+    """List all profiles and their configured services."""
     cfg = _require_config()
     if not cfg.profiles:
         click.echo("(no profiles configured — run `mien login <name> --service ...`)")
@@ -561,6 +562,7 @@ def list_cmd() -> None:
 
 @main.command("status")
 def status_cmd() -> None:
+    """Show the active profile and its shell variables."""
     active = os.environ.get("MIEN_PROFILE")
     if not active:
         click.echo("no profile active in this shell")
@@ -2273,6 +2275,7 @@ def token_cmd(service: str, profile: str | None, force: bool) -> None:
 @click.option("--workspace", help="Slack workspace label (required for --service slack)")
 def logout_cmd(profile_name: str, service: str, custom_name: str | None,
                workspace: str | None) -> None:
+    """Remove stored credentials for a service from a profile."""
     var_name = _custom_var_name(service, custom_name)
     cfg = _require_config()
     prof = cfg.profiles.get(profile_name)
@@ -2414,6 +2417,7 @@ def _check_remote_credentials(cwd: str) -> None:
 @main.command("doctor")
 @click.option("--gc", is_flag=True, help="Sweep stale ephemeral files for dead PIDs")
 def doctor_cmd(gc: bool) -> None:
+    """Check config, backend health, and git remotes that embed a token."""
     cfg = _require_config()
     click.echo(f"config:    {config_path()}")
     click.echo(f"backend:   {cfg.secrets_backend.type}")

@@ -2417,7 +2417,7 @@ def _check_remote_credentials(cwd: str) -> None:
 @main.command("doctor")
 @click.option("--gc", is_flag=True, help="Sweep stale ephemeral files for dead PIDs")
 def doctor_cmd(gc: bool) -> None:
-    """Verify config, backend health, and stored credentials."""
+    """Check config, backend health, and git remotes that embed a token."""
     cfg = _require_config()
     click.echo(f"config:    {config_path()}")
     click.echo(f"backend:   {cfg.secrets_backend.type}")

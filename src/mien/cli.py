@@ -693,6 +693,7 @@ def _identity_card(prof: Profile) -> str:
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the identity as JSON instead of the human card.")
 def whoami_cmd(profile: str | None, live: bool, as_json: bool) -> None:
+    """Show which identities a profile authenticates as; --live asks each provider."""
     cfg = _require_config()
     name = profile or os.environ.get("MIEN_PROFILE")
     if not name:
@@ -1261,6 +1262,7 @@ def _stdout_is_tty() -> bool:
                    "wrapper passes $$ (the calling shell) so the files survive as "
                    "long as that shell — not just this short-lived process.")
 def use_cmd(profile_name: str, force_print: bool, owner_pid: int | None) -> None:
+    """Print a profile's env loader for the shell to eval."""
     if _stdout_is_tty() and not force_print:
         raise click.ClickException(
             "stdout is a TTY — refusing to emit the env loader.\n"

@@ -55,7 +55,10 @@ def render_shell_init(shell: str) -> str:
             f"unsupported shell {shell!r}; expected one of {', '.join(_SUPPORTED_SHELLS)}"
         )
     header = f"# mien shell integration — eval \"$(mien shell-init --shell {shell})\"\n"
-    return header + _SHELL_WRAPPERS
+    # Click ships subcommand completion behind `_MIEN_COMPLETE=<shell>_source`;
+    # sourcing it here is all it takes, so only this line forks by shell.
+    completion = f"eval \"$(_MIEN_COMPLETE={shell}_source mien)\"\n"
+    return header + _SHELL_WRAPPERS + completion
 
 
 # Re-exported from `mien.env`, which sets these variables and must name their

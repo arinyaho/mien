@@ -28,6 +28,14 @@ def test_mien_use_wrapper_passes_the_owner_pid():
         assert "command mien use --owner-pid $$" in script
 
 
+def test_shell_init_wires_up_subcommand_completion():
+    """Click's completion is activated by one env-var'd eval — pin that it is
+    there, per shell, or `mien <TAB>` silently stops completing subcommands."""
+    for shell in ("zsh", "bash"):
+        script = render_shell_init(shell)
+        assert f"_MIEN_COMPLETE={shell}_source" in script
+
+
 def test_shell_init_command_prints_the_script():
     result = CliRunner().invoke(main, ["shell-init"])
     assert result.exit_code == 0, result.output

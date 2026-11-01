@@ -61,6 +61,8 @@ cd ~/projects/mien && uv tool install --editable .
 /plugin install mien@arinyaho
 ```
 
+The plugin installs the CLI for you: a `SessionStart` hook runs `uv tool install` when `mien` is not on `PATH`, and prints the manual command if `uv` is missing.
+
 Codex, GitHub Copilot Chat, and Hermes Agent install the same skill their own way — see **[docs/guide.md](docs/guide.md#agent-skill-install)**. Once installed, the agent invokes `mien` automatically when you mention identity-scoped work — e.g. "as my work account", "switch to personal".
 
 ## Bootstrap

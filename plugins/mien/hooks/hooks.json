@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v mien >/dev/null 2>&1 || { command -v uv >/dev/null 2>&1 && uv tool install git+https://github.com/arinyaho/mien >/dev/null 2>&1 && command -v mien >/dev/null 2>&1 || echo 'The mien CLI is not on PATH and could not be installed automatically. Install uv, then run: uv tool install git+https://github.com/arinyaho/mien'; }"
+          }
+        ]
+      }
+    ]
+  }
+}
